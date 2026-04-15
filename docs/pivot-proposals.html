@@ -1,0 +1,675 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ピボット活用案 - Hyperliquid Bot</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #0d1117;
+    color: #e6edf3;
+    padding: 20px;
+    max-width: 840px;
+    margin: 0 auto;
+    line-height: 1.7;
+  }
+  h1 {
+    text-align: center;
+    font-size: 1.6rem;
+    margin-bottom: 6px;
+    color: #58a6ff;
+  }
+  .subtitle {
+    text-align: center;
+    color: #8b949e;
+    font-size: 0.85rem;
+    margin-bottom: 32px;
+  }
+
+  /* ピボット解説 */
+  .explainer {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 12px;
+    padding: 24px;
+    margin-bottom: 28px;
+  }
+  .explainer h2 {
+    color: #58a6ff;
+    font-size: 1.1rem;
+    margin-bottom: 14px;
+  }
+  .explainer p {
+    color: #8b949e;
+    font-size: 0.9rem;
+    margin-bottom: 8px;
+  }
+  .explainer strong { color: #e6edf3; }
+  .pivot-diagram {
+    background: #0d1117;
+    border-radius: 8px;
+    padding: 16px;
+    margin: 14px 0;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 0.82rem;
+    line-height: 1.9;
+    color: #8b949e;
+    overflow-x: auto;
+  }
+  .pivot-diagram .r { color: #f85149; }
+  .pivot-diagram .p { color: #d29922; font-weight: 700; }
+  .pivot-diagram .s { color: #3fb950; }
+
+  /* カード */
+  .card {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 12px;
+    padding: 24px;
+    margin-bottom: 20px;
+  }
+  .card-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+  .card-number {
+    background: #58a6ff;
+    color: #0d1117;
+    font-weight: 700;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.9rem;
+    flex-shrink: 0;
+  }
+  .card-title {
+    font-size: 1.15rem;
+    font-weight: 600;
+    color: #f0f6fc;
+  }
+  .tags {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 14px;
+  }
+  .tag {
+    font-size: 0.75rem;
+    padding: 3px 10px;
+    border-radius: 20px;
+    font-weight: 500;
+  }
+  .tag-filter { background: #1f2a3b; color: #58a6ff; }
+  .tag-reversal { background: #3b1f2a; color: #f85149; }
+  .tag-breakout { background: #2a2a1f; color: #d29922; }
+  .tag-precision { background: #2a1f3b; color: #bc8cff; }
+  .tag-zone { background: #1f3a2a; color: #3fb950; }
+  .tag-bot { background: #1a2733; color: #79c0ff; }
+
+  .entry-exit {
+    background: #0d1117;
+    border-radius: 8px;
+    padding: 14px;
+    margin-bottom: 14px;
+    font-size: 0.9rem;
+  }
+  .entry-exit .label {
+    font-weight: 600;
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 4px;
+  }
+  .entry-exit .buy { color: #3fb950; }
+  .entry-exit .sell { color: #f85149; }
+  .entry-exit .neutral { color: #58a6ff; }
+  .entry-exit p { margin-bottom: 8px; color: #e6edf3; }
+  .entry-exit p:last-child { margin-bottom: 0; }
+
+  .merit-demerit {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin: 14px 0;
+  }
+  @media (max-width: 600px) {
+    .merit-demerit { grid-template-columns: 1fr; }
+  }
+  .merit, .demerit {
+    background: #0d1117;
+    border-radius: 8px;
+    padding: 12px;
+    font-size: 0.85rem;
+  }
+  .merit { border-left: 3px solid #3fb950; }
+  .demerit { border-left: 3px solid #f85149; }
+  .merit h4 { color: #3fb950; font-size: 0.8rem; margin-bottom: 6px; }
+  .demerit h4 { color: #f85149; font-size: 0.8rem; margin-bottom: 6px; }
+  .merit ul, .demerit ul { list-style: none; padding: 0; color: #8b949e; }
+  .merit li::before { content: "○ "; color: #3fb950; }
+  .demerit li::before { content: "× "; color: #f85149; }
+  .merit li, .demerit li { margin-bottom: 4px; }
+
+  .sl-tp {
+    background: #0d1117;
+    border-radius: 8px;
+    padding: 12px;
+    margin-bottom: 14px;
+    font-size: 0.85rem;
+    border-left: 3px solid #d29922;
+  }
+  .sl-tp h4 { color: #d29922; font-size: 0.8rem; margin-bottom: 6px; }
+  .sl-tp p { color: #8b949e; margin-bottom: 4px; }
+  .sl-tp p:last-child { margin-bottom: 0; }
+  .sl-tp strong { color: #e6edf3; }
+
+  .example {
+    background: #0d1117;
+    border-radius: 8px;
+    padding: 14px;
+    margin-bottom: 14px;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 0.82rem;
+    line-height: 1.8;
+    color: #8b949e;
+    overflow-x: auto;
+  }
+  .example .g { color: #3fb950; }
+  .example .r { color: #f85149; }
+  .example .y { color: #d29922; }
+  .example .b { color: #58a6ff; }
+
+  /* 比較表 */
+  .compare-section {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 12px;
+    padding: 24px;
+    margin: 28px 0;
+  }
+  .compare-section h2 {
+    color: #58a6ff;
+    font-size: 1.1rem;
+    margin-bottom: 16px;
+    text-align: center;
+  }
+  .compare-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.8rem;
+  }
+  .compare-table th {
+    text-align: center;
+    color: #8b949e;
+    font-size: 0.75rem;
+    padding: 8px 4px;
+    border-bottom: 1px solid #30363d;
+  }
+  .compare-table td {
+    text-align: center;
+    padding: 10px 4px;
+    border-bottom: 1px solid #21262d;
+    color: #e6edf3;
+    font-size: 0.82rem;
+  }
+  .compare-table td:first-child { text-align: left; font-weight: 600; }
+  .val-high { color: #3fb950; }
+  .val-mid { color: #d29922; }
+  .val-low { color: #f85149; }
+
+  /* おすすめ */
+  .recommend {
+    background: #161b22;
+    border: 2px solid #58a6ff;
+    border-radius: 12px;
+    padding: 24px;
+    margin-top: 28px;
+  }
+  .recommend h2 {
+    color: #58a6ff;
+    font-size: 1.2rem;
+    margin-bottom: 16px;
+    text-align: center;
+  }
+  .rank-table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+  .rank-table th {
+    text-align: left;
+    color: #8b949e;
+    font-size: 0.8rem;
+    padding: 8px 12px;
+    border-bottom: 1px solid #30363d;
+  }
+  .rank-table td {
+    padding: 12px;
+    border-bottom: 1px solid #21262d;
+    font-size: 0.9rem;
+  }
+  .rank-badge {
+    display: inline-block;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    text-align: center;
+    line-height: 28px;
+    font-weight: 700;
+    font-size: 0.85rem;
+  }
+  .rank-1 { background: #d29922; color: #0d1117; }
+  .rank-2 { background: #8b949e; color: #0d1117; }
+  .rank-3 { background: #a1714e; color: #0d1117; }
+  .rank-name { font-weight: 600; color: #f0f6fc; }
+
+  .footer {
+    text-align: center;
+    color: #484f58;
+    font-size: 0.75rem;
+    margin-top: 40px;
+    padding-top: 20px;
+    border-top: 1px solid #21262d;
+  }
+</style>
+</head>
+<body>
+
+<h1>ピボット活用案</h1>
+<p class="subtitle">Hyperliquid自動売買Bot - ピボットポイントを使った戦略拡張</p>
+
+<!-- ピボット解説 -->
+<div class="explainer">
+  <h2>ピボットポイントとは？</h2>
+  <p>前日の<strong>高値・安値・終値</strong>から「今日の基準価格」と「反転しやすい価格帯」を自動計算する指標です。多くのトレーダーが意識するため、<strong>実際にその価格帯で反発が起きやすい</strong>特徴があります。</p>
+
+  <div class="pivot-diagram">
+    <span class="r">R3  $86,000</span>  ─── 強い抵抗線（ここまで来たら上がりすぎ）<br>
+    <span class="r">R2  $85,500</span><br>
+    <span class="r">R1  $85,000</span>  ─── ここで売りが入りやすい<br>
+    <br>
+    <span class="p">P   $84,500</span>  ─── 今日の基準価格（ここより上なら買い優勢）<br>
+    <br>
+    <span class="s">S1  $84,000</span>  ─── ここで買いが入りやすい<br>
+    <span class="s">S2  $83,500</span><br>
+    <span class="s">S3  $83,000</span>  ─── 強い支持線（ここまで来たら下がりすぎ）
+  </div>
+
+  <p><strong>計算式:</strong> P = (高値 + 安値 + 終値) / 3 を基準に、R1〜R3, S1〜S3 を算出</p>
+  <p><strong>更新頻度:</strong> 1日1回（前日の確定値から算出）→ 当日中は固定値として機能</p>
+</div>
+
+<!-- 案1 -->
+<div class="card">
+  <div class="card-header">
+    <div class="card-number">1</div>
+    <div class="card-title">ピボット + RSI 30-30 強化</div>
+  </div>
+  <div class="tags">
+    <span class="tag tag-filter">フィルター型</span>
+    <span class="tag tag-reversal">逆張り強化</span>
+    <span class="tag tag-bot">Bot適性◎</span>
+  </div>
+  <div class="entry-exit">
+    <div class="label buy">エントリー（買い）</div>
+    <p>既存RSI 30-30のシグナル + 価格がピボットS1/S2付近</p>
+    <div class="label sell">エントリー（売り）</div>
+    <p>既存RSI 30-30のシグナル + 価格がピボットR1/R2付近</p>
+    <div class="label neutral">条件</div>
+    <p>両方が重なった時だけエントリー → 回数は減るが精度UP</p>
+  </div>
+  <div class="example">
+    <span class="y">RSI 30-30シグナル発生:</span> BTC $84,020 で買いシグナル<br>
+    <span class="b">ピボットS1:</span> $84,000<br>
+    <span class="g">→ S1付近でRSIシグナルが重なった → エントリー</span><br>
+    <br>
+    <span class="y">RSI 30-30シグナル発生:</span> BTC $84,300 で買いシグナル<br>
+    <span class="b">ピボットS1:</span> $84,000（$300離れている）<br>
+    <span class="r">→ ピボット付近ではない → スキップ</span>
+  </div>
+  <div class="merit-demerit">
+    <div class="merit">
+      <h4>メリット</h4>
+      <ul>
+        <li>既存RSI 30-30にフィルター追加するだけ</li>
+        <li>開発工数が最小（数十行の追加）</li>
+        <li>勝率が上がる（2重確認）</li>
+      </ul>
+    </div>
+    <div class="demerit">
+      <h4>デメリット</h4>
+      <ul>
+        <li>エントリー回数が減る</li>
+        <li>ピボットとRSIが同時に重なる場面は限定的</li>
+        <li>独立した新戦略ではない</li>
+      </ul>
+    </div>
+  </div>
+  <div class="sl-tp">
+    <h4>利確・損切り</h4>
+    <p><strong>損切り:</strong> 次のピボットライン（S1で買い → S2が損切り）</p>
+    <p><strong>利確:</strong> ピボットP（基準価格）or R1</p>
+    <p><strong>RR:</strong> S1→P の幅で自動決定。通常1.5〜2.5程度</p>
+  </div>
+</div>
+
+<!-- 案2 -->
+<div class="card">
+  <div class="card-header">
+    <div class="card-number">2</div>
+    <div class="card-title">ピボットバウンス</div>
+  </div>
+  <div class="tags">
+    <span class="tag tag-reversal">逆張り</span>
+    <span class="tag tag-bot">Bot適性◎</span>
+  </div>
+  <div class="entry-exit">
+    <div class="label buy">エントリー（買い）</div>
+    <p>価格がS1/S2に到達 + 反転ローソク足確認 → ロング</p>
+    <div class="label sell">エントリー（売り）</div>
+    <p>価格がR1/R2に到達 + 反転ローソク足確認 → ショート</p>
+  </div>
+  <div class="example">
+    <span class="b">ピボットライン:</span> S1=$84,000 / P=$84,500 / R1=$85,000<br>
+    <br>
+    <span class="y">14:00</span> BTC $84,050 → S1付近に到達<br>
+    <span class="y">14:05</span> 陽線確認（反転の兆候）<br>
+    <span class="g">14:05</span> → $84,050 でロングエントリー<br>
+    <span class="g">損切り:</span> $83,500（S2）<br>
+    <span class="g">利確:</span> $84,500（P）→ <span class="g">+$450（RR ≒ 0.8）</span><br>
+    <br>
+    <span class="y">より良いRR:</span> S2付近でエントリーすれば<br>
+    <span class="g">損切り:</span> $83,000（S3）/ <span class="g">利確:</span> $84,000（S1）→ <span class="g">RR = 2.0</span>
+  </div>
+  <div class="merit-demerit">
+    <div class="merit">
+      <h4>メリット</h4>
+      <ul>
+        <li>ルールが明確（ライン到達+反転で入る）</li>
+        <li>損切り・利確が自動で決まる（ライン間の幅）</li>
+        <li>取引頻度が十分（1日5〜10回）</li>
+        <li>レンジ相場で特に強い</li>
+      </ul>
+    </div>
+    <div class="demerit">
+      <h4>デメリット</h4>
+      <ul>
+        <li>強いトレンドではS1/R1を突き抜けて損切り連発</li>
+        <li>ライン間の幅が狭い日は利幅が小さい</li>
+        <li>24h市場の「前日」区切りの設定が必要</li>
+      </ul>
+    </div>
+  </div>
+  <div class="sl-tp">
+    <h4>利確・損切り</h4>
+    <p><strong>損切り:</strong> 次のピボットライン（S1買い → S2、R1売り → R2）</p>
+    <p><strong>利確:</strong> 手前のピボットライン（S1買い → P、R1売り → P）</p>
+    <p><strong>特徴:</strong> ライン間の幅 = 利幅。RRはライン配置で自動決定。S2/R2の方がRRが良い</p>
+  </div>
+</div>
+
+<!-- 案3 -->
+<div class="card">
+  <div class="card-header">
+    <div class="card-number">3</div>
+    <div class="card-title">ピボットブレイクアウト</div>
+  </div>
+  <div class="tags">
+    <span class="tag tag-breakout">ブレイクアウト</span>
+    <span class="tag tag-breakout">順張り</span>
+    <span class="tag tag-bot">Bot適性○</span>
+  </div>
+  <div class="entry-exit">
+    <div class="label buy">エントリー（買い）</div>
+    <p>価格がR1を上抜け + 出来高増加 → ロング（ブレイクに乗る）</p>
+    <div class="label sell">エントリー（売り）</div>
+    <p>価格がS1を下抜け + 出来高増加 → ショート</p>
+  </div>
+  <div class="example">
+    <span class="b">ピボットライン:</span> S1=$84,000 / P=$84,500 / R1=$85,000 / R2=$85,500<br>
+    <br>
+    <span class="y">15:00</span> BTC $84,950 → R1に接近<br>
+    <span class="y">15:05</span> BTC $85,020 → <span class="g">R1を上抜け + 出来高急増</span><br>
+    <span class="g">15:05</span> → $85,020 でロングエントリー<br>
+    <span class="r">損切り:</span> $85,000（R1 = 抜けたライン）→ <span class="r">-$20</span><br>
+    <span class="g">利確:</span> $85,500（R2）→ <span class="g">+$480（RR ≒ 24）</span>
+  </div>
+  <div class="merit-demerit">
+    <div class="merit">
+      <h4>メリット</h4>
+      <ul>
+        <li>トレンドに乗るので利幅が大きくなりやすい</li>
+        <li>損切りが非常にタイト（抜けたラインの直下）</li>
+        <li>RRが非常に良い（損切り小 vs 利幅大）</li>
+      </ul>
+    </div>
+    <div class="demerit">
+      <h4>デメリット</h4>
+      <ul>
+        <li>ダマシ（一瞬抜けて戻る）が多い</li>
+        <li>出来高フィルターがないと勝率が低い</li>
+        <li>レンジ相場ではほぼ機能しない</li>
+      </ul>
+    </div>
+  </div>
+  <div class="sl-tp">
+    <h4>利確・損切り</h4>
+    <p><strong>損切り:</strong> 抜けたピボットライン（R1ブレイク → R1が損切り）</p>
+    <p><strong>利確:</strong> 次のライン（R1ブレイク → R2）</p>
+    <p><strong>特徴:</strong> 損切りがタイトなのでRRが非常に良い。ただしダマシで勝率は40〜50%程度</p>
+  </div>
+</div>
+
+<!-- 案4 -->
+<div class="card">
+  <div class="card-header">
+    <div class="card-number">4</div>
+    <div class="card-title">ピボット + ボリバン ダブルフィルター</div>
+  </div>
+  <div class="tags">
+    <span class="tag tag-precision">高精度</span>
+    <span class="tag tag-reversal">逆張り</span>
+    <span class="tag tag-bot">Bot適性○</span>
+  </div>
+  <div class="entry-exit">
+    <div class="label buy">エントリー（買い）</div>
+    <p>ピボットS1付近 + ボリバン下バンド付近 + 反転確認</p>
+    <div class="label sell">エントリー（売り）</div>
+    <p>ピボットR1付近 + ボリバン上バンド付近 + 反転確認</p>
+    <div class="label neutral">条件</div>
+    <p>2つのサポート/レジスタンスが重なるゾーンでのみエントリー</p>
+  </div>
+  <div class="example">
+    <span class="b">ピボットS1:</span> $84,000<br>
+    <span class="b">ボリバン下バンド:</span> $84,050<br>
+    <span class="g">→ 2つのサポートが$50以内で重なっている → 強い反発ゾーン</span><br>
+    <br>
+    <span class="b">ピボットS1:</span> $84,000<br>
+    <span class="b">ボリバン下バンド:</span> $83,200<br>
+    <span class="r">→ $800離れている → 重なっていない → スキップ</span>
+  </div>
+  <div class="merit-demerit">
+    <div class="merit">
+      <h4>メリット</h4>
+      <ul>
+        <li>2つの指標が重なる = 反発確率が高い</li>
+        <li>勝率60〜70%が期待できる</li>
+        <li>根拠が明確で判断に迷わない</li>
+      </ul>
+    </div>
+    <div class="demerit">
+      <h4>デメリット</h4>
+      <ul>
+        <li>2つが重なる場面は1日1〜2回程度</li>
+        <li>取引頻度が低い</li>
+        <li>ボリバンが広がっている時はS1と重ならない</li>
+      </ul>
+    </div>
+  </div>
+  <div class="sl-tp">
+    <h4>利確・損切り</h4>
+    <p><strong>損切り:</strong> S2 or ボリバン下バンドの外側（広い方を採用）</p>
+    <p><strong>利確:</strong> ピボットP or ボリバン中心線（SMA20）</p>
+    <p><strong>特徴:</strong> 損切りポイントが2つの指標で補強される。「ここを抜けたら本当にダメ」が明確</p>
+  </div>
+</div>
+
+<!-- 案5 -->
+<div class="card">
+  <div class="card-header">
+    <div class="card-number">5</div>
+    <div class="card-title">ピボット + VWAP ゾーントレード</div>
+  </div>
+  <div class="tags">
+    <span class="tag tag-zone">ゾーン判定</span>
+    <span class="tag tag-bot">Bot適性◎</span>
+  </div>
+  <div class="entry-exit">
+    <div class="label neutral">ゾーン判定</div>
+    <p>価格 &gt; P かつ &gt; VWAP → <strong>買いゾーン</strong>（ロングのみ）</p>
+    <p>価格 &lt; P かつ &lt; VWAP → <strong>売りゾーン</strong>（ショートのみ）</p>
+    <p>P と VWAP の間 → <strong>中立</strong>（エントリーしない）</p>
+    <div class="label buy">エントリー</div>
+    <p>買いゾーンで → S1やVWAPまで押したら買い</p>
+    <div class="label sell">エントリー</div>
+    <p>売りゾーンで → R1やVWAPまで戻したら売り</p>
+  </div>
+  <div class="example">
+    <span class="b">ピボットP:</span> $84,500 / <span class="b">VWAP:</span> $84,600<br>
+    <span class="y">現在価格:</span> $84,800<br>
+    <span class="g">→ P($84,500)より上 かつ VWAP($84,600)より上 → 買いゾーン</span><br>
+    <br>
+    <span class="y">14:30</span> BTC $84,620 → VWAPまで押した<br>
+    <span class="g">→ 買いゾーン + VWAP到達 → ロングエントリー</span><br>
+    <span class="r">損切り:</span> P($84,500)を割ったら → ゾーンが崩れた<br>
+    <span class="g">利確:</span> R1($85,000)
+  </div>
+  <div class="merit-demerit">
+    <div class="merit">
+      <h4>メリット</h4>
+      <ul>
+        <li>まず方向を決めてからエントリー → 逆張り事故が少ない</li>
+        <li>ピボットとVWAPの2つで方向確認 → 信頼性が高い</li>
+        <li>取引頻度が十分（1日3〜8回）</li>
+        <li>「買いゾーンでは買いだけ」のルールが明快</li>
+      </ul>
+    </div>
+    <div class="demerit">
+      <h4>デメリット</h4>
+      <ul>
+        <li>VWAPの計算に出来高データが必要</li>
+        <li>中立ゾーン（PとVWAPの間）ではエントリーできない</li>
+        <li>急なトレンド転換時にゾーン判定が遅れる</li>
+      </ul>
+    </div>
+  </div>
+  <div class="sl-tp">
+    <h4>利確・損切り</h4>
+    <p><strong>損切り:</strong> ゾーンが崩れたら（P or VWAP を割ったら即撤退）</p>
+    <p><strong>利確:</strong> R1/R2（買いゾーン時）or S1/S2（売りゾーン時）</p>
+    <p><strong>特徴:</strong> 「方向が合ってる間は保有、方向が崩れたら撤退」のシンプルルール</p>
+  </div>
+</div>
+
+<!-- 比較表 -->
+<div class="compare-section">
+  <h2>比較まとめ</h2>
+  <table class="compare-table">
+    <thead>
+      <tr>
+        <th>案</th>
+        <th>種類</th>
+        <th>取引頻度</th>
+        <th>勝率目安</th>
+        <th>RR</th>
+        <th>Bot適性</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>1 ピボット+RSI</td>
+        <td>フィルター</td>
+        <td class="val-mid">1〜3回/日</td>
+        <td class="val-high">55〜65%</td>
+        <td class="val-mid">1.5〜2.5</td>
+        <td class="val-high">◎</td>
+      </tr>
+      <tr>
+        <td>2 バウンス</td>
+        <td>逆張り</td>
+        <td class="val-high">5〜10回/日</td>
+        <td class="val-mid">50〜60%</td>
+        <td class="val-mid">1.0〜2.0</td>
+        <td class="val-high">◎</td>
+      </tr>
+      <tr>
+        <td>3 ブレイクアウト</td>
+        <td>順張り</td>
+        <td class="val-mid">2〜5回/日</td>
+        <td class="val-low">40〜50%</td>
+        <td class="val-high">3.0〜10+</td>
+        <td class="val-mid">○</td>
+      </tr>
+      <tr>
+        <td>4 ピボット+BB</td>
+        <td>高精度逆張り</td>
+        <td class="val-low">1〜2回/日</td>
+        <td class="val-high">60〜70%</td>
+        <td class="val-mid">1.5〜2.0</td>
+        <td class="val-mid">○</td>
+      </tr>
+      <tr>
+        <td>5 ピボット+VWAP</td>
+        <td>ゾーン</td>
+        <td class="val-high">3〜8回/日</td>
+        <td class="val-mid">50〜60%</td>
+        <td class="val-mid">1.5〜2.5</td>
+        <td class="val-high">◎</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- おすすめ -->
+<div class="recommend">
+  <h2>おすすめ順位</h2>
+  <table class="rank-table">
+    <thead>
+      <tr>
+        <th>順位</th>
+        <th>案</th>
+        <th>理由</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><span class="rank-badge rank-1">1</span></td>
+        <td><span class="rank-name">案2: ピボットバウンス</span></td>
+        <td>最もBot向き。ルール明確、頻度十分、損切り/利確がピボットラインで自動決定</td>
+      </tr>
+      <tr>
+        <td><span class="rank-badge rank-2">2</span></td>
+        <td><span class="rank-name">案1: ピボット + RSI 30-30 強化</span></td>
+        <td>開発最小。既存RSI 30-30にフィルター追加するだけで勝率向上</td>
+      </tr>
+      <tr>
+        <td><span class="rank-badge rank-3">3</span></td>
+        <td><span class="rank-name">案5: ピボット + VWAP ゾーン</span></td>
+        <td>方向判断が加わるので逆張り事故が少ない。頻度も十分</td>
+      </tr>
+    </tbody>
+  </table>
+</div>
+
+<div class="footer">
+  Hyperliquid Trading Bot &mdash; Strategy Proposals
+</div>
+
+</body>
+</html>
