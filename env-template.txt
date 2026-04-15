@@ -1,0 +1,14 @@
+# Hyperliquid Bot 環境変数
+# このファイルをコピーして .env を作成し、値を入力してください
+# cp env-template.txt .env && nano .env
+
+# ウォレットA（BTC用）
+HL_WALLET_ADDRESS_A=
+HL_API_PRIVATE_KEY_A=
+
+# ウォレットB（SOL用）
+HL_WALLET_ADDRESS_B=
+HL_API_PRIVATE_KEY_B=
+
+# Discord Webhook URL（Claude Codeが設定済み）
+DISCORD_WEBHOOK_URL=

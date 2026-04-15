@@ -1,0 +1,54 @@
+x-bot-common: &bot-common
+  build: .
+  restart: unless-stopped
+  env_file: .env
+  volumes:
+    - bot-data:/app/data
+  networks:
+    - bot-network
+  logging:
+    driver: json-file
+    options:
+      max-size: "3m"
+      max-file: "3"
+
+services:
+  # RSI 30-30
+  bot-btc-rsi:
+    <<: *bot-common
+    container_name: bot-btc-rsi
+    command: python -m src.main --strategy rsi30 --symbol BTC --mode dry
+
+  bot-sol-rsi:
+    <<: *bot-common
+    container_name: bot-sol-rsi
+    command: python -m src.main --strategy rsi30 --symbol SOL --mode dry
+
+  # シンプルMM
+  bot-btc-mm:
+    <<: *bot-common
+    container_name: bot-btc-mm
+    command: python -m src.main --strategy simple_mm --symbol BTC --mode dry
+
+  bot-sol-mm:
+    <<: *bot-common
+    container_name: bot-sol-mm
+    command: python -m src.main --strategy simple_mm --symbol SOL --mode dry
+
+  # フルスペックMM（Temari型）
+  bot-btc-fullmm:
+    <<: *bot-common
+    container_name: bot-btc-fullmm
+    command: python -m src.main --strategy full_mm --symbol BTC --mode dry
+
+  bot-sol-fullmm:
+    <<: *bot-common
+    container_name: bot-sol-fullmm
+    command: python -m src.main --strategy full_mm --symbol SOL --mode dry
+
+volumes:
+  bot-data:
+
+networks:
+  bot-network:
+    driver: bridge
