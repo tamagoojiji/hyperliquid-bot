@@ -9,6 +9,8 @@ from src.config import SimpleMMConfig
 from src.strategies.base import BaseStrategy, Signal, SignalType
 from src.utils.logger import get_logger
 
+_SECONDS_PER_DAY = 86400
+
 logger = get_logger("full_mm")
 
 # ボラティリティ計算の基準値
@@ -223,6 +225,17 @@ class FullMMStrategy(BaseStrategy):
         self.unrealized_pnl: float = 0.0
         self.position_entry_ts: float = 0.0
 
+        # 安全装置: 状態管理
+        self._stopped: bool = False
+        self._stopped_reason: str = ""  # "daily_loss" / "volatility_spike"
+        self._stopped_at: float = 0.0
+        self._stopped_day: int = -1
+        self._daily_realized_loss: float = 0.0
+        self._daily_reset_day: int = -1
+        self._atr_24h_samples: deque[float] = deque(maxlen=1440)
+        self._atr_24h_avg: float = 0.0
+        self._current_atr: float = 0.0
+
         # --- Full MM 追加コンポーネント ---
         self._fill_toxicity = FillToxicityTracker()
         self._smc = SmcAnalyzer()
@@ -326,6 +339,90 @@ class FullMMStrategy(BaseStrategy):
         self._smc.update(candles_15m, candles_4h)
 
     # ------------------------------------------------------------------
+    # 安全装置
+    # ------------------------------------------------------------------
+
+    def should_stop_loss(self) -> bool:
+        """含み損が資金のposition_stop_loss_pct%に達したか"""
+        threshold = self.config.initial_balance * self.config.position_stop_loss_pct / 100
+        return self.unrealized_pnl < -threshold
+
+    def is_daily_limit_reached(self) -> bool:
+        """1日の累計実現損が上限に達したか"""
+        threshold = self.config.initial_balance * self.config.daily_loss_limit_pct / 100
+        return self._daily_realized_loss >= threshold
+
+    def is_volatility_spike(self) -> bool:
+        """ATRが24時間平均のatr_spike_multiplier倍以上か"""
+        if self._atr_24h_avg <= 0 or self._current_atr <= 0:
+            return False
+        return self._current_atr >= self._atr_24h_avg * self.config.atr_spike_multiplier
+
+    def update_atr(self, atr_value: float):
+        """外部からATR値を注入（1分ごとに呼ばれる想定）"""
+        self._current_atr = atr_value
+        self._atr_24h_samples.append(atr_value)
+        if len(self._atr_24h_samples) > 0:
+            self._atr_24h_avg = sum(self._atr_24h_samples) / len(self._atr_24h_samples)
+
+    def record_realized_loss(self, amount: float):
+        """実現損を記録（外部から呼ばれる）。amountは正の値で損失額"""
+        self._daily_realized_loss += amount
+        logger.info(
+            f"[{self.symbol}] Realized loss recorded: ${amount:.2f}, "
+            f"daily total: ${self._daily_realized_loss:.2f}"
+        )
+
+    def _stop(self, reason: str):
+        """安全装置による停止"""
+        now = time.time()
+        self._stopped = True
+        self._stopped_reason = reason
+        self._stopped_at = now
+        self._stopped_day = int(now // _SECONDS_PER_DAY)
+        logger.warning(
+            f"[{self.symbol}] Safety stop: {reason} | "
+            f"daily_loss=${self._daily_realized_loss:.2f}, "
+            f"atr={self._current_atr:.4f}, atr_24h_avg={self._atr_24h_avg:.4f}"
+        )
+
+    def _check_daily_reset(self):
+        """UTC 0:00を跨いだら日次損失をリセット"""
+        today = int(time.time() // _SECONDS_PER_DAY)
+        if today != self._daily_reset_day:
+            if self._daily_realized_loss > 0:
+                logger.info(
+                    f"[{self.symbol}] Daily loss reset: "
+                    f"${self._daily_realized_loss:.2f} -> $0.00"
+                )
+            self._daily_realized_loss = 0.0
+            self._daily_reset_day = today
+
+    def _check_recovery(self):
+        """停止状態からの復活チェック（日次損失 or ボラ急騰）"""
+        now = time.time()
+        today = int(now // _SECONDS_PER_DAY)
+
+        # 条件①: UTC翌日になっている
+        if today <= self._stopped_day:
+            return
+
+        # 条件②: ATRが24h平均の recovery_multiplier 倍以下（相場が落ち着いた）
+        if self._atr_24h_avg > 0 and self._current_atr > 0:
+            if self._current_atr > self._atr_24h_avg * self.config.atr_recovery_multiplier:
+                return
+
+        # 両条件クリア → 復活
+        logger.info(
+            f"[{self.symbol}] Recovery from '{self._stopped_reason}': "
+            f"atr={self._current_atr:.4f}, atr_24h_avg={self._atr_24h_avg:.4f}"
+        )
+        self._stopped = False
+        self._stopped_reason = ""
+        self._stopped_at = 0.0
+        self._check_daily_reset()
+
+    # ------------------------------------------------------------------
     # マルチレベルクオート算出
     # ------------------------------------------------------------------
 
@@ -343,6 +440,25 @@ class FullMMStrategy(BaseStrategy):
             }
         """
         no_quote = {"should_quote": False, "levels": []}
+
+        # 復活チェック（停止中の場合）
+        if self._stopped:
+            self._check_recovery()
+            if self._stopped:
+                return no_quote
+
+        # 日次リセット
+        self._check_daily_reset()
+
+        # 日次損失上限
+        if self.is_daily_limit_reached():
+            self._stop("daily_loss")
+            return no_quote
+
+        # ボラ急騰
+        if self.is_volatility_spike():
+            self._stop("volatility_spike")
+            return no_quote
 
         if not self._price_valid or self._quote_paused:
             return no_quote
@@ -393,7 +509,8 @@ class FullMMStrategy(BaseStrategy):
                 size_mult = 0.80
             else:
                 size_mult = 1.20
-            base_size = self.config.order_size_usd * size_mult
+            # サイズをコイン建てに変換（USD / 価格）
+            base_size = (self.config.order_size_usd * size_mult / fair) if fair > 0 else 0.0
 
             bid_size = base_size if not bid_stopped else 0.0
             ask_size = base_size if not ask_stopped else 0.0
@@ -476,6 +593,13 @@ class FullMMStrategy(BaseStrategy):
             "offset_samples": len(self._offset_buf),
             "trade_samples": len(self._trade_buf),
             "should_force_close": self.should_force_close(),
+            "should_stop_loss": self.should_stop_loss(),
+            "stopped": self._stopped,
+            "stopped_reason": self._stopped_reason,
+            "daily_realized_loss": round(self._daily_realized_loss, 4),
+            "current_atr": round(self._current_atr, 6),
+            "atr_24h_avg": round(self._atr_24h_avg, 6),
+            "atr_samples": len(self._atr_24h_samples),
         }
 
     # ------------------------------------------------------------------

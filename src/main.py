@@ -13,6 +13,12 @@ from src.strategies.base import SignalType
 from src.strategies.rsi30 import RSI30Strategy
 from src.strategies.simple_mm import SimpleMMStrategy
 from src.strategies.full_mm import FullMMStrategy
+from src.strategies.pivot_bounce import PivotBounceStrategy
+from src.strategies.breakout import BreakoutStrategy
+from src.strategies.macd_vwap import MACDVWAPStrategy
+from src.strategies.rsi30_fibo import RSI30FiboStrategy
+from src.strategies.pivot_bb import PivotBBStrategy
+from src.strategies.pivot_vwap import PivotVWAPStrategy
 from src.data.candle_builder import CandleBuilder, Candle
 from src.data.db import Database
 from src.notify.discord import DiscordNotifier
@@ -63,10 +69,22 @@ class Bot:
             return SimpleMMStrategy(self.cfg.symbol, self.cfg.mode, self.cfg.simple_mm)
         elif self.cfg.strategy == "full_mm":
             return FullMMStrategy(self.cfg.symbol, self.cfg.mode, self.cfg.simple_mm)
+        elif self.cfg.strategy == "pivot_bounce":
+            return PivotBounceStrategy(self.cfg.symbol, self.cfg.mode, self.cfg.rsi30)
+        elif self.cfg.strategy == "breakout":
+            return BreakoutStrategy(self.cfg.symbol, self.cfg.mode, self.cfg.rsi30)
+        elif self.cfg.strategy == "macd_vwap":
+            return MACDVWAPStrategy(self.cfg.symbol, self.cfg.mode, self.cfg.rsi30)
+        elif self.cfg.strategy == "rsi30_fibo":
+            return RSI30FiboStrategy(self.cfg.symbol, self.cfg.mode, self.cfg.rsi30)
+        elif self.cfg.strategy == "pivot_bb":
+            return PivotBBStrategy(self.cfg.symbol, self.cfg.mode, self.cfg.rsi30)
+        elif self.cfg.strategy == "pivot_vwap":
+            return PivotVWAPStrategy(self.cfg.symbol, self.cfg.mode, self.cfg.rsi30)
         raise ValueError(f"Unknown strategy: {self.cfg.strategy}")
 
     def _get_risk_config(self) -> dict:
-        if self.cfg.strategy == "rsi30":
+        if self.cfg.strategy in ("rsi30", "pivot_bounce", "breakout", "macd_vwap", "rsi30_fibo", "pivot_bb", "pivot_vwap"):
             return {
                 "max_loss": self.cfg.rsi30.max_loss_usd,
                 "max_position": self.cfg.rsi30.max_position_usd,
@@ -148,7 +166,7 @@ class Bot:
                 volume=float(c.get("v", 0)),
             )
             self.candle_5m.load_single(candle)
-            if self.cfg.strategy == "rsi30":
+            if self.cfg.strategy in ("rsi30", "pivot_bounce", "breakout", "macd_vwap", "rsi30_fibo", "pivot_bb", "pivot_vwap"):
                 self.strategy.on_candle(candle)
 
         # 30分足
@@ -163,7 +181,7 @@ class Bot:
                 volume=float(c.get("v", 0)),
             )
             self.candle_30m.load_single(candle)
-            if self.cfg.strategy == "rsi30":
+            if self.cfg.strategy in ("rsi30", "pivot_bounce", "breakout", "macd_vwap", "rsi30_fibo", "pivot_bb", "pivot_vwap"):
                 self.strategy.on_filter_candle(candle)
 
         log.info(
@@ -173,31 +191,34 @@ class Bot:
 
     async def _on_hl_trade(self, trade: dict):
         """HLトレードデータのコールバック"""
-        price = float(trade.get("px", 0))
-        size = float(trade.get("sz", 0))
-        ts = trade.get("time", time.time() * 1000) / 1000
+        try:
+            price = float(trade.get("px", 0))
+            size = float(trade.get("sz", 0))
+            ts = trade.get("time", time.time() * 1000) / 1000
 
-        # キャンドルビルダーに投入
-        completed_5m = self.candle_5m.update(price, size, ts)
-        completed_30m = self.candle_30m.update(price, size, ts)
+            # キャンドルビルダーに投入
+            completed_5m = self.candle_5m.update(price, size, ts)
+            completed_30m = self.candle_30m.update(price, size, ts)
 
-        # 30分足確定 → フィルター更新
-        if completed_30m and self.cfg.strategy == "rsi30":
-            self.strategy.on_filter_candle(completed_30m)
+            # 30分足確定 → フィルター更新
+            if completed_30m and self.cfg.strategy in ("rsi30", "pivot_bounce", "breakout", "macd_vwap", "rsi30_fibo", "pivot_bb", "pivot_vwap"):
+                self.strategy.on_filter_candle(completed_30m)
 
-        # 5分足確定 → シグナル判定
-        if completed_5m:
-            await self._process_candle(completed_5m)
+            # 5分足確定 → シグナル判定
+            if completed_5m:
+                await self._process_candle(completed_5m)
 
-        # リアルタイムSL/TP監視
-        self.strategy.on_trade(price, size, ts)
+            # リアルタイムSL/TP監視
+            self.strategy.on_trade(price, size, ts)
 
-        # MM戦略: 価格更新
-        if self.cfg.strategy in ("simple_mm", "full_mm"):
-            hl_mid = price
-            hl_mark = price
-            if self.binance.ready:
-                self.strategy.update_prices(self.binance.mid, hl_mid, hl_mark)
+            # MM戦略: 価格更新
+            if self.cfg.strategy in ("simple_mm", "full_mm"):
+                hl_mid = price
+                hl_mark = price
+                if self.binance.ready:
+                    self.strategy.update_prices(self.binance.mid, hl_mid, hl_mark)
+        except Exception as e:
+            log.error(f"Error in _on_hl_trade: {e}", exc_info=True)
 
     async def _process_candle(self, candle: Candle):
         """キャンドル確定時のシグナル処理"""
@@ -276,10 +297,34 @@ class Bot:
         )
 
     async def _mm_quote_loop(self):
-        """MM戦略: 定期的にquoteを計算しログ/通知"""
+        """MM戦略: 仮想約定シミュレーション付きドライラン
+
+        仕組み:
+        1. 毎秒quoteを計算（bid/askの価格とサイズ）
+        2. 実際のHLトレード価格がbid以下に下がったら「買い約定」
+        3. 実際のHLトレード価格がask以上に上がったら「売り約定」
+        4. 仮想ポジションを持ち、反対側で決済されたらPnLを計算
+        5. エントリー・決済をDiscordに通知
+        """
         interval = self.cfg.simple_mm.update_interval_ms / 1000
-        last_notify = 0.0
-        notify_interval = 300  # 5分ごとにDiscord通知
+
+        # 仮想ポジション管理
+        virtual_pos = 0.0        # +ロング / -ショート
+        virtual_entry = 0.0      # エントリー価格
+        virtual_pnl = 0.0        # 累計PnL
+        virtual_trades = 0       # 取引回数
+        virtual_wins = 0         # 勝ち回数
+
+        # 累計計測の開始時刻（JST）
+        # SOL: 2026-04-16 00:00 JST = 2026-04-15 15:00 UTC
+        # BTC: 2026-04-16 07:00 JST = 2026-04-15 22:00 UTC
+        from datetime import datetime, timezone, timedelta
+        if self.cfg.symbol == "SOL":
+            pnl_start_utc = datetime(2026, 4, 15, 15, 0, 0, tzinfo=timezone.utc).timestamp()
+        else:  # BTC
+            pnl_start_utc = datetime(2026, 4, 15, 22, 0, 0, tzinfo=timezone.utc).timestamp()
+        pnl_started = False
+
         while self._running:
             await asyncio.sleep(interval)
             if not hasattr(self.strategy, 'get_quotes'):
@@ -287,56 +332,137 @@ class Bot:
             if not self.strategy.ready():
                 continue
 
+            # 開始時刻まで待機（quoteは計算するが累計に含めない）
+            if not pnl_started:
+                if time.time() >= pnl_start_utc:
+                    pnl_started = True
+                    virtual_pnl = 0.0
+                    virtual_trades = 0
+                    virtual_wins = 0
+                    log.info(f"PnL tracking started for {self.cfg.symbol}")
+
             quotes = self.strategy.get_quotes()
             if not quotes["should_quote"]:
                 continue
 
-            # ドライラン: shadow_fillsに記録（bidとask両方）
-            # マルチレベル対応
+            # quote価格を取得
             levels = quotes.get("levels")
             if levels:
-                for level in levels:
-                    for side_key, side_name in [("bid", "buy"), ("ask", "sell")]:
-                        price = level.get(f"{side_key}_price", 0)
-                        size = level.get(f"{side_key}_size", 0)
-                        if price > 0 and size > 0:
-                            await self.db.insert_shadow_fill(
-                                strategy=self.strategy.name,
-                                symbol=self.cfg.symbol,
-                                side=side_name,
-                                signal_price=price,
-                                would_fill_price=price,
-                                size=size,
-                                estimated_pnl=0.0,
-                                fill_model="mm_quote",
-                            )
+                l0 = levels[0]
+                bid = l0.get("bid_price", 0)
+                ask = l0.get("ask_price", 0)
+                bid_sz = l0.get("bid_size", 0)
+                ask_sz = l0.get("ask_size", 0)
             else:
-                for side_key, side_name in [("bid", "buy"), ("ask", "sell")]:
-                    price = quotes.get(f"{side_key}_price", 0)
-                    size = quotes.get(f"{side_key}_size", 0)
-                    if price > 0 and size > 0:
-                        await self.db.insert_shadow_fill(
-                            strategy=self.strategy.name,
-                            symbol=self.cfg.symbol,
-                            side=side_name,
-                            signal_price=price,
-                            would_fill_price=price,
-                            size=size,
-                            estimated_pnl=0.0,
-                            fill_model="mm_quote",
-                        )
+                bid = quotes.get("bid_price", 0)
+                ask = quotes.get("ask_price", 0)
+                bid_sz = quotes.get("bid_size", 0)
+                ask_sz = quotes.get("ask_size", 0)
 
-            # 5分ごとにDiscord通知
-            now = time.time()
-            if now - last_notify >= notify_interval:
-                last_notify = now
-                state = self.strategy.get_state() if hasattr(self.strategy, 'get_state') else None
-                await self.discord.notify_mm_quote(
-                    strategy=self.strategy.name,
-                    symbol=self.cfg.symbol,
-                    quotes=quotes,
-                    state=state,
-                )
+            if bid <= 0 or ask <= 0:
+                continue
+
+            # 現在のHL価格を取得
+            current = self.candle_5m.current
+            if not current:
+                continue
+            hl_price = current.close
+
+            # === 仮想約定判定 ===
+
+            if virtual_pos == 0.0:
+                # ポジションなし → bid/ask両方で待機
+                if hl_price <= bid and bid_sz > 0:
+                    # 買い約定（誰かがbidに売ってきた）
+                    virtual_pos = bid_sz
+                    virtual_entry = bid
+                    state = self.strategy.get_state() if hasattr(self.strategy, 'get_state') else None
+                    await self.discord.notify_entry(
+                        strategy=self.strategy.name,
+                        symbol=self.cfg.symbol,
+                        side="buy",
+                        price=bid,
+                        size=bid_sz * bid,
+                        state=state,
+                        balance=100.0,
+                    )
+                    await self.db.insert_shadow_fill(
+                        strategy=self.strategy.name, symbol=self.cfg.symbol,
+                        side="buy", signal_price=bid, would_fill_price=bid,
+                        size=bid_sz, estimated_pnl=0.0, fill_model="mm_sim",
+                    )
+
+                elif hl_price >= ask and ask_sz > 0:
+                    # 売り約定（誰かがaskに買ってきた）
+                    virtual_pos = -ask_sz
+                    virtual_entry = ask
+                    state = self.strategy.get_state() if hasattr(self.strategy, 'get_state') else None
+                    await self.discord.notify_entry(
+                        strategy=self.strategy.name,
+                        symbol=self.cfg.symbol,
+                        side="sell",
+                        price=ask,
+                        size=ask_sz * ask,
+                        state=state,
+                        balance=100.0,
+                    )
+                    await self.db.insert_shadow_fill(
+                        strategy=self.strategy.name, symbol=self.cfg.symbol,
+                        side="sell", signal_price=ask, would_fill_price=ask,
+                        size=ask_sz, estimated_pnl=0.0, fill_model="mm_sim",
+                    )
+
+            elif virtual_pos > 0:
+                # ロング中 → ask価格まで上がったら決済
+                if hl_price >= ask:
+                    pnl = (ask - virtual_entry) * virtual_pos
+                    virtual_pnl += pnl
+                    virtual_trades += 1
+                    if pnl > 0:
+                        virtual_wins += 1
+                    await self.discord.notify_exit(
+                        strategy=self.strategy.name,
+                        symbol=self.cfg.symbol,
+                        side="buy",
+                        price=ask,
+                        size=virtual_pos * ask,
+                        pnl=pnl,
+                        hold_time="MM",
+                        total_pnl=virtual_pnl,
+                    )
+                    await self.db.insert_shadow_fill(
+                        strategy=self.strategy.name, symbol=self.cfg.symbol,
+                        side="sell", signal_price=ask, would_fill_price=ask,
+                        size=virtual_pos, estimated_pnl=pnl, fill_model="mm_sim_exit",
+                    )
+                    virtual_pos = 0.0
+                    virtual_entry = 0.0
+
+            elif virtual_pos < 0:
+                # ショート中 → bid価格まで下がったら決済
+                if hl_price <= bid:
+                    pnl = (virtual_entry - bid) * abs(virtual_pos)
+                    virtual_pnl += pnl
+                    virtual_trades += 1
+                    if pnl > 0:
+                        virtual_wins += 1
+                    await self.discord.notify_exit(
+                        strategy=self.strategy.name,
+                        symbol=self.cfg.symbol,
+                        side="sell",
+                        price=bid,
+                        size=abs(virtual_pos) * bid,
+                        pnl=pnl,
+                        hold_time="MM",
+                        total_pnl=virtual_pnl,
+                    )
+                    await self.db.insert_shadow_fill(
+                        strategy=self.strategy.name, symbol=self.cfg.symbol,
+                        side="buy", signal_price=bid, would_fill_price=bid,
+                        size=abs(virtual_pos), estimated_pnl=pnl, fill_model="mm_sim_exit",
+                    )
+                    virtual_pos = 0.0
+                    virtual_entry = 0.0
 
     async def _main_loop(self):
         """メインループ — 状態監視"""
@@ -416,7 +542,7 @@ class Bot:
 def parse_args():
     parser = argparse.ArgumentParser(description="Hyperliquid Trading Bot")
     parser.add_argument(
-        "--strategy", choices=["rsi30", "simple_mm", "full_mm"],
+        "--strategy", choices=["rsi30", "simple_mm", "full_mm", "pivot_bounce", "breakout", "macd_vwap", "rsi30_fibo", "pivot_bb", "pivot_vwap"],
         default="rsi30", help="Trading strategy"
     )
     parser.add_argument(

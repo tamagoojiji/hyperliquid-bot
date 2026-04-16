@@ -46,6 +46,72 @@ services:
     container_name: bot-sol-fullmm
     command: python -m src.main --strategy full_mm --symbol SOL --mode dry
 
+  # ピボットバウンス
+  bot-btc-pivot:
+    <<: *bot-common
+    container_name: bot-btc-pivot
+    command: python -m src.main --strategy pivot_bounce --symbol BTC --mode dry
+
+  bot-sol-pivot:
+    <<: *bot-common
+    container_name: bot-sol-pivot
+    command: python -m src.main --strategy pivot_bounce --symbol SOL --mode dry
+
+  # ブレイクアウト
+  bot-btc-breakout:
+    <<: *bot-common
+    container_name: bot-btc-breakout
+    command: python -m src.main --strategy breakout --symbol BTC --mode dry
+
+  bot-sol-breakout:
+    <<: *bot-common
+    container_name: bot-sol-breakout
+    command: python -m src.main --strategy breakout --symbol SOL --mode dry
+
+  # MACD + VWAP
+  bot-btc-macdvwap:
+    <<: *bot-common
+    container_name: bot-btc-macdvwap
+    command: python -m src.main --strategy macd_vwap --symbol BTC --mode dry
+
+  bot-sol-macdvwap:
+    <<: *bot-common
+    container_name: bot-sol-macdvwap
+    command: python -m src.main --strategy macd_vwap --symbol SOL --mode dry
+
+  # RSI 30-30 + フィボ
+  bot-btc-rsifibo:
+    <<: *bot-common
+    container_name: bot-btc-rsifibo
+    command: python -m src.main --strategy rsi30_fibo --symbol BTC --mode dry
+
+  bot-sol-rsifibo:
+    <<: *bot-common
+    container_name: bot-sol-rsifibo
+    command: python -m src.main --strategy rsi30_fibo --symbol SOL --mode dry
+
+  # ピボット + ボリバン
+  bot-btc-pivotbb:
+    <<: *bot-common
+    container_name: bot-btc-pivotbb
+    command: python -m src.main --strategy pivot_bb --symbol BTC --mode dry
+
+  bot-sol-pivotbb:
+    <<: *bot-common
+    container_name: bot-sol-pivotbb
+    command: python -m src.main --strategy pivot_bb --symbol SOL --mode dry
+
+  # ピボット + VWAP
+  bot-btc-pivotvwap:
+    <<: *bot-common
+    container_name: bot-btc-pivotvwap
+    command: python -m src.main --strategy pivot_vwap --symbol BTC --mode dry
+
+  bot-sol-pivotvwap:
+    <<: *bot-common
+    container_name: bot-sol-pivotvwap
+    command: python -m src.main --strategy pivot_vwap --symbol SOL --mode dry
+
 volumes:
   bot-data:
 

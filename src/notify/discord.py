@@ -28,10 +28,16 @@ class DiscordNotifier:
     async def _send(self, content: str):
         if not self._session or not self.webhook_url:
             return
-        payload = {"content": content}
-        async with self._session.post(self.webhook_url, json=payload) as resp:
-            if resp.status != 204:
+        for attempt in range(3):
+            async with self._session.post(self.webhook_url, json={"content": content}) as resp:
+                if resp.status == 204:
+                    return
+                if resp.status == 429:
+                    retry_after = 2.0 * (attempt + 1)
+                    await asyncio.sleep(retry_after)
+                    continue
                 print(f"Discord webhook failed: {resp.status}")
+                return
 
     def _ts(self) -> str:
         return datetime.now(JST).strftime("%H:%M:%S")
@@ -53,13 +59,15 @@ class DiscordNotifier:
         leverage = size / balance if balance > 0 else 0
         msg = (
             f"{arrow} **{strategy} {symbol} {side_label}** [{self._ts()}]\n"
-            f"価格: `${price:,.2f}` | 金額: `${size:,.2f}` | レバ: `{leverage:.1f}x`\n"
-            f"損切: `${sl:,.2f}` | 利確: `${tp:,.2f}`"
+            f"価格: `${price:,.2f}` | 金額: `${size:,.2f}` | レバ: `{leverage:.1f}x`"
         )
+        if sl > 0 or tp > 0:
+            msg += f"\n損切: `${sl:,.2f}` | 利確: `${tp:,.2f}`"
         await self._queue.put(msg)
 
     async def notify_exit(self, strategy: str, symbol: str, side: str, price: float,
-                          size: float, pnl: float, hold_time: str):
+                          size: float, pnl: float, hold_time: str,
+                          total_pnl: float = 0.0, initial_balance: float = 100.0):
         if pnl >= 0:
             emoji = "\U0001f4b0"
             result = "利確"
@@ -67,10 +75,13 @@ class DiscordNotifier:
             emoji = "\U0001f4c9"
             result = "損切"
         pnl_sign = "+" if pnl >= 0 else ""
+        total_sign = "+" if total_pnl >= 0 else ""
+        total_pct = total_pnl / initial_balance * 100 if initial_balance > 0 else 0
+        pct_sign = "+" if total_pct >= 0 else ""
         msg = (
             f"{emoji} **{result} {strategy} {symbol}** [{self._ts()}]\n"
             f"決済価格: `${price:,.2f}` | 損益: `{pnl_sign}${pnl:,.4f}`\n"
-            f"保有: {hold_time}"
+            f"累計: `{total_sign}${total_pnl:,.2f}` (`{pct_sign}{total_pct:.1f}%`) | 保有: {hold_time}"
         )
         await self._queue.put(msg)
 

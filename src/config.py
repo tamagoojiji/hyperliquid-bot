@@ -72,6 +72,13 @@ class SimpleMMConfig:
     max_hold_seconds: int = 300       # IOCクローズまでの最大保有時間
     price_divergence_bps: float = 50.0  # BinanceとHL乖離閾値
 
+    # 安全装置
+    initial_balance: float = 100.0        # 初期資金（USD）
+    position_stop_loss_pct: float = 5.0   # 含み損が資金の何%で損切り
+    daily_loss_limit_pct: float = 10.0    # 1日の累計実現損上限（資金の%）
+    atr_spike_multiplier: float = 3.0     # ATR急騰判定（24h平均の何倍）
+    atr_recovery_multiplier: float = 2.0  # ATR復活条件（24h平均の何倍以下）
+
 
 # ペア別MMパラメータオーバーライド
 MM_OVERRIDES: dict[str, dict] = {
