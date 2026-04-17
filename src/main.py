@@ -166,11 +166,12 @@ class Bot:
                 volume=float(c.get("v", 0)),
             )
             self.candle_5m.load_single(candle)
-            if self.cfg.strategy in ("rsi30", "pivot_bounce", "breakout", "macd_vwap", "rsi30_fibo", "pivot_bb", "pivot_vwap"):
+            if self.cfg.strategy in ("pivot_bounce", "breakout", "macd_vwap", "rsi30_fibo", "pivot_bb", "pivot_vwap"):
                 self.strategy.on_candle(candle)
 
-        # 30分足
-        candles_30m = self.hl.get_candles(self.cfg.symbol, "30m", limit=100)
+        # 30分足 — rsi30は200EMA用に多めに取得
+        candles_30m_limit = 300 if self.cfg.strategy == "rsi30" else 100
+        candles_30m = self.hl.get_candles(self.cfg.symbol, "30m", limit=candles_30m_limit)
         for c in candles_30m:
             candle = Candle(
                 timestamp=c["t"] / 1000,
@@ -181,7 +182,9 @@ class Bot:
                 volume=float(c.get("v", 0)),
             )
             self.candle_30m.load_single(candle)
-            if self.cfg.strategy in ("rsi30", "pivot_bounce", "breakout", "macd_vwap", "rsi30_fibo", "pivot_bb", "pivot_vwap"):
+            if self.cfg.strategy == "rsi30":
+                self.strategy.on_candle(candle)
+            elif self.cfg.strategy in ("pivot_bounce", "breakout", "macd_vwap", "rsi30_fibo", "pivot_bb", "pivot_vwap"):
                 self.strategy.on_filter_candle(candle)
 
         log.info(
@@ -200,12 +203,17 @@ class Bot:
             completed_5m = self.candle_5m.update(price, size, ts)
             completed_30m = self.candle_30m.update(price, size, ts)
 
-            # 30分足確定 → フィルター更新
-            if completed_30m and self.cfg.strategy in ("rsi30", "pivot_bounce", "breakout", "macd_vwap", "rsi30_fibo", "pivot_bb", "pivot_vwap"):
-                self.strategy.on_filter_candle(completed_30m)
+            # 30分足確定
+            if completed_30m:
+                if self.cfg.strategy == "rsi30":
+                    # rsi30は30分足でシグナル判定
+                    await self._process_candle(completed_30m)
+                elif self.cfg.strategy in ("pivot_bounce", "breakout", "macd_vwap", "rsi30_fibo", "pivot_bb", "pivot_vwap"):
+                    # 他戦略は30分足をフィルターとして使用
+                    self.strategy.on_filter_candle(completed_30m)
 
-            # 5分足確定 → シグナル判定
-            if completed_5m:
+            # 5分足確定 → シグナル判定（rsi30以外）
+            if completed_5m and self.cfg.strategy != "rsi30":
                 await self._process_candle(completed_5m)
 
             # リアルタイムSL/TP監視

@@ -15,23 +15,22 @@ log = get_logger("rsi30")
 
 
 class RSI30Strategy(BaseStrategy):
-    """RSI 30-30: マルチタイムフレーム・ミーンリバージョン戦略
+    """RSI 30-30: 30分足シングルタイムフレーム・ミーンリバージョン戦略
 
-    エントリー足: 5分
-    フィルター足: 30分
+    全インジケータを30分足で計算。
     エントリー条件（買い）:
       1. 価格がRSI Channel下バンド以下に到達
       2. 次の足で始値 > 前の足の安値（反転の兆候）
       3. その足の終値 > EMA 9
       4. BB下バンド付近
-      5. 30分足EMAが上向き（方向フィルター）
+      5. 200EMAが上向き（方向フィルター）
     """
 
     def __init__(self, symbol: str, mode: str, config: RSI30Config | None = None):
         super().__init__(symbol, mode)
         self.cfg = config or RSI30Config()
 
-        # エントリー足（5分）のインジケーター
+        # 30分足インジケーター
         self.rsi = RSIChannel(
             period=self.cfg.rsi_period,
             ob_level=self.cfg.rsi_ob_level,
@@ -45,9 +44,9 @@ class RSI30Strategy(BaseStrategy):
         self.ema = EMA(period=self.cfg.ema_period)
         self.atr = ATR(period=self.cfg.atr_period)
 
-        # フィルター足（30分）のEMA
-        self.filter_ema = EMA(period=self.cfg.filter_ema_period)
-        self._prev_filter_ema: float = 0.0
+        # 方向フィルター用の200EMA（同じ30分足）
+        self.trend_ema = EMA(period=self.cfg.trend_ema_period)
+        self._prev_trend_ema: float = 0.0
 
         # 状態追跡
         self._prev_candle: Candle | None = None
@@ -73,7 +72,7 @@ class RSI30Strategy(BaseStrategy):
             and self.bb.ready
             and self.ema.ready
             and self.atr.ready
-            and self.filter_ema.ready
+            and self.trend_ema.ready
         )
 
     def on_trade(self, price: float, size: float, timestamp: float):
@@ -92,18 +91,17 @@ class RSI30Strategy(BaseStrategy):
             elif price <= self._take_profit:
                 self._close_position("take_profit")
 
-    def on_filter_candle(self, candle: Candle):
-        """30分足キャンドル確定時に呼ばれる"""
-        self._prev_filter_ema = self.filter_ema.value if self.filter_ema.ready else 0.0
-        self.filter_ema.update(candle.close)
-
     def on_candle(self, candle: Candle) -> Signal:
-        """5分足キャンドル確定時にシグナル判定"""
-        # インジケーター更新
+        """30分足キャンドル確定時にシグナル判定"""
+        # 200EMA傾き判定用に更新前の値を保存
+        self._prev_trend_ema = self.trend_ema.value if self.trend_ema.ready else 0.0
+
+        # インジケーター更新（全て30分足）
         self.rsi.update(candle.close)
         self.bb.update(candle.close)
         self.ema.update(candle.close)
         self.atr.update(candle.high, candle.low, candle.close)
+        self.trend_ema.update(candle.close)
 
         if not self.ready():
             self._prev_candle = candle
@@ -169,16 +167,16 @@ class RSI30Strategy(BaseStrategy):
         return Signal(type=SignalType.NONE)
 
     def _filter_bullish(self) -> bool:
-        """30分足EMAが上向きか"""
-        if not self.filter_ema.ready or self._prev_filter_ema == 0:
+        """200EMAが上向きか"""
+        if not self.trend_ema.ready or self._prev_trend_ema == 0:
             return False
-        return self.filter_ema.value > self._prev_filter_ema
+        return self.trend_ema.value > self._prev_trend_ema
 
     def _filter_bearish(self) -> bool:
-        """30分足EMAが下向きか"""
-        if not self.filter_ema.ready or self._prev_filter_ema == 0:
+        """200EMAが下向きか"""
+        if not self.trend_ema.ready or self._prev_trend_ema == 0:
             return False
-        return self.filter_ema.value < self._prev_filter_ema
+        return self.trend_ema.value < self._prev_trend_ema
 
     def _create_buy_signal(self, candle: Candle) -> Signal:
         """買いシグナル生成"""
@@ -280,5 +278,6 @@ class RSI30Strategy(BaseStrategy):
             "bb_upper": self.bb.upper if self.bb.ready else None,
             "bb_lower": self.bb.lower if self.bb.ready else None,
             "ema": self.ema.value if self.ema.ready else None,
+            "trend_ema": self.trend_ema.value if self.trend_ema.ready else None,
             "atr": self.atr.value if self.atr.ready else None,
         }

@@ -29,9 +29,8 @@ class HLConfig:
 @dataclass
 class RSI30Config:
     """RSI 30-30 戦略パラメータ"""
-    # タイムフレーム
-    entry_tf_seconds: int = 300       # 5分足
-    filter_tf_seconds: int = 1800     # 30分足
+    # タイムフレーム（全指標を30分足で計算）
+    entry_tf_seconds: int = 1800      # 30分足
 
     # RSI Channel
     rsi_period: int = 14
@@ -43,9 +42,9 @@ class RSI30Config:
     bb_period: int = 20
     bb_multiplier: float = 2.0
 
-    # EMA
-    ema_period: int = 9               # エントリー足（5分）EMA
-    filter_ema_period: int = 200      # フィルター足（30分）EMA
+    # EMA（全て30分足）
+    ema_period: int = 9               # 短期EMA（反転確認用）
+    trend_ema_period: int = 200       # トレンドEMA（方向フィルター用）
 
     # ATR（損切り・利確）
     atr_period: int = 14
