@@ -132,13 +132,13 @@ class RSI30Strategy(BaseStrategy):
             # Step 2: 現在の足の始値 > 前の足の安値（反転の兆候）
             if candle.open <= self._prev_low:
                 self._signal_armed_buy = False
-            # Step 3: 終値 > EMA 9
+            # Step 3: 終値 > 9EMA（反転確認）
             elif candle.close <= self.ema.value:
                 pass  # まだ条件未達、次の足で再チェック
             # Step 4: BB下バンド付近（終値がBB下バンド + BB幅の20%以内）
             elif candle.close > self.bb.lower + (self.bb.upper - self.bb.lower) * 0.2:
                 self._signal_armed_buy = False
-            # Step 5: 30分足EMAが上向き
+            # Step 5: 200EMAが上向き（方向フィルター）
             elif not self._filter_bullish():
                 self._signal_armed_buy = False
             else:
