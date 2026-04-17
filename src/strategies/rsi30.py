@@ -46,7 +46,7 @@ class RSI30Strategy(BaseStrategy):
         self.atr = ATR(period=self.cfg.atr_period)
 
         # フィルター足（30分）のEMA
-        self.filter_ema = EMA(period=self.cfg.ema_period)
+        self.filter_ema = EMA(period=self.cfg.filter_ema_period)
         self._prev_filter_ema: float = 0.0
 
         # 状態追跡

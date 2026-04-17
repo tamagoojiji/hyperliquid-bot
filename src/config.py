@@ -44,7 +44,8 @@ class RSI30Config:
     bb_multiplier: float = 2.0
 
     # EMA
-    ema_period: int = 9
+    ema_period: int = 9               # エントリー足（5分）EMA
+    filter_ema_period: int = 200      # フィルター足（30分）EMA
 
     # ATR（損切り・利確）
     atr_period: int = 14
