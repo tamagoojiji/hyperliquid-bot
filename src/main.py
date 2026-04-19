@@ -19,6 +19,7 @@ from src.strategies.macd_vwap import MACDVWAPStrategy
 from src.strategies.rsi30_fibo import RSI30FiboStrategy
 from src.strategies.pivot_bb import PivotBBStrategy
 from src.strategies.pivot_vwap import PivotVWAPStrategy
+from src.strategies.session_bo import SessionBreakoutStrategy
 from src.data.candle_builder import CandleBuilder, Candle
 from src.data.db import Database
 from src.notify.discord import DiscordNotifier
@@ -81,6 +82,8 @@ class Bot:
             return PivotBBStrategy(self.cfg.symbol, self.cfg.mode, self.cfg.rsi30)
         elif self.cfg.strategy == "pivot_vwap":
             return PivotVWAPStrategy(self.cfg.symbol, self.cfg.mode, self.cfg.rsi30)
+        elif self.cfg.strategy == "session_bo":
+            return SessionBreakoutStrategy(self.cfg.symbol, self.cfg.mode, self.cfg.session_bo)
         raise ValueError(f"Unknown strategy: {self.cfg.strategy}")
 
     def _get_risk_config(self) -> dict:
@@ -93,6 +96,11 @@ class Bot:
             return {
                 "max_loss": self.cfg.simple_mm.max_loss_usd,
                 "max_position": self.cfg.simple_mm.max_position_usd,
+            }
+        elif self.cfg.strategy == "session_bo":
+            return {
+                "max_loss": self.cfg.session_bo.max_loss_usd,
+                "max_position": self.cfg.session_bo.max_position_usd,
             }
         return {"max_loss": 20.0, "max_position": 30.0}
 
@@ -166,7 +174,7 @@ class Bot:
                 volume=float(c.get("v", 0)),
             )
             self.candle_5m.load_single(candle)
-            if self.cfg.strategy in ("pivot_bounce", "breakout", "macd_vwap", "rsi30_fibo", "pivot_bb", "pivot_vwap"):
+            if self.cfg.strategy in ("pivot_bounce", "breakout", "macd_vwap", "rsi30_fibo", "pivot_bb", "pivot_vwap", "session_bo"):
                 self.strategy.on_candle(candle)
 
         # 30分足 — rsi30は200EMA用に多めに取得
@@ -212,9 +220,11 @@ class Bot:
                     # 他戦略は30分足をフィルターとして使用
                     self.strategy.on_filter_candle(completed_30m)
 
-            # 5分足確定 → シグナル判定（rsi30以外）
+            # 5分足確定 → シグナル判定（rsi30以外。session_boも5分足）
             if completed_5m and self.cfg.strategy != "rsi30":
                 await self._process_candle(completed_5m)
+
+            # session_bo は30分足フィルター不要（5分足で直接レンジ構築）
 
             # リアルタイムSL/TP監視
             self.strategy.on_trade(price, size, ts)
@@ -550,7 +560,7 @@ class Bot:
 def parse_args():
     parser = argparse.ArgumentParser(description="Hyperliquid Trading Bot")
     parser.add_argument(
-        "--strategy", choices=["rsi30", "simple_mm", "full_mm", "pivot_bounce", "breakout", "macd_vwap", "rsi30_fibo", "pivot_bb", "pivot_vwap"],
+        "--strategy", choices=["rsi30", "simple_mm", "full_mm", "pivot_bounce", "breakout", "macd_vwap", "rsi30_fibo", "pivot_bb", "pivot_vwap", "session_bo"],
         default="rsi30", help="Trading strategy"
     )
     parser.add_argument(

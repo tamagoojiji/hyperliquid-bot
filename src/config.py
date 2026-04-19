@@ -80,6 +80,25 @@ class SimpleMMConfig:
     atr_recovery_multiplier: float = 2.0  # ATR復活条件（24h平均の何倍以下）
 
 
+@dataclass
+class SessionBOConfig:
+    """Session Breakout 戦略パラメータ"""
+    # レンジ時間帯（UTC）
+    range_start_hour_utc: int = 0     # レンジ開始
+    range_end_hour_utc: int = 8       # レンジ終了 & ブレイク判定開始
+    session_end_hour_utc: int = 23    # ブレイク判定終了（日またぎ禁止）
+
+    # 注文サイズ・リスク
+    order_size_usd: float = 10.0
+    max_position_usd: float = 30.0
+    max_loss_usd: float = 20.0
+
+    # 利確設定
+    tp1_range_mult: float = 1.0       # 利確1 = レンジ幅 × 1（半分決済）
+    tp2_range_mult: float = 2.0       # 利確2 = レンジ幅 × 2（残り決済）
+    tp1_close_ratio: float = 0.5      # 利確1で半分決済
+
+
 # ペア別MMパラメータオーバーライド
 MM_OVERRIDES: dict[str, dict] = {
     "SOL": {
@@ -101,6 +120,7 @@ class BotConfig:
     discord_webhook_url: str = ""
     rsi30: RSI30Config = field(default_factory=RSI30Config)
     simple_mm: SimpleMMConfig = field(default_factory=SimpleMMConfig)
+    session_bo: SessionBOConfig = field(default_factory=SessionBOConfig)
 
     @classmethod
     def from_env(cls, strategy: str = "rsi30", symbol: str = "BTC",

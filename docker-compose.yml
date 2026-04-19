@@ -112,6 +112,17 @@ services:
     container_name: bot-sol-pivotvwap
     command: python -m src.main --strategy pivot_vwap --symbol SOL --mode dry
 
+  # セッションブレイクアウト
+  bot-btc-sessionbo:
+    <<: *bot-common
+    container_name: bot-btc-sessionbo
+    command: python -m src.main --strategy session_bo --symbol BTC --mode dry
+
+  bot-sol-sessionbo:
+    <<: *bot-common
+    container_name: bot-sol-sessionbo
+    command: python -m src.main --strategy session_bo --symbol SOL --mode dry
+
 volumes:
   bot-data:
 
