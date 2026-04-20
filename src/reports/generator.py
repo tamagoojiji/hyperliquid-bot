@@ -98,6 +98,46 @@ def _query_stats(conn, start_iso, end_iso):
     return out
 
 
+def _query_ls_by_symbol(conn, start_iso, end_iso):
+    """(strategy, symbol) ごとに Long / Short の内訳を返す。PNG1カード用。
+
+    Long:  エントリー= mm_sim/touch × buy, 決済= mm_sim_exit × sell
+    Short: エントリー= mm_sim/touch × sell, 決済= mm_sim_exit × buy
+    """
+    rows = _q(conn, """
+        SELECT strategy, symbol,
+               SUM(CASE WHEN fill_model IN ('mm_sim','touch') AND side='buy'  THEN 1 ELSE 0 END),
+               SUM(CASE WHEN fill_model='mm_sim_exit' AND side='sell' THEN 1 ELSE 0 END),
+               SUM(CASE WHEN fill_model='mm_sim_exit' AND side='sell' AND estimated_pnl>0 THEN 1 ELSE 0 END),
+               ROUND(SUM(CASE WHEN fill_model='mm_sim_exit' AND side='sell' THEN estimated_pnl ELSE 0 END), 4),
+               SUM(CASE WHEN fill_model IN ('mm_sim','touch') AND side='sell' THEN 1 ELSE 0 END),
+               SUM(CASE WHEN fill_model='mm_sim_exit' AND side='buy'  THEN 1 ELSE 0 END),
+               SUM(CASE WHEN fill_model='mm_sim_exit' AND side='buy'  AND estimated_pnl>0 THEN 1 ELSE 0 END),
+               ROUND(SUM(CASE WHEN fill_model='mm_sim_exit' AND side='buy'  THEN estimated_pnl ELSE 0 END), 4)
+        FROM shadow_fills
+        WHERE timestamp >= ? AND timestamp < ?
+        GROUP BY strategy, symbol
+    """, (start_iso, end_iso))
+    out = {}
+    for (strategy, symbol, l_ent, l_cls, l_win, l_pnl,
+         s_ent, s_cls, s_win, s_pnl) in rows:
+        l_pnl = l_pnl or 0.0
+        s_pnl = s_pnl or 0.0
+        l_cls = l_cls or 0
+        s_cls = s_cls or 0
+        out[(strategy, symbol)] = {
+            'long_entries': l_ent or 0, 'long_closes': l_cls,
+            'long_wins': l_win or 0,
+            'long_win_rate': (l_win / l_cls * 100) if l_cls > 0 else 0.0,
+            'long_pnl': l_pnl, 'long_pnl_pct': l_pnl / INITIAL_BALANCE * 100,
+            'short_entries': s_ent or 0, 'short_closes': s_cls,
+            'short_wins': s_win or 0,
+            'short_win_rate': (s_win / s_cls * 100) if s_cls > 0 else 0.0,
+            'short_pnl': s_pnl, 'short_pnl_pct': s_pnl / INITIAL_BALANCE * 100,
+        }
+    return out
+
+
 def _query_fills(conn, start_iso, end_iso, symbol):
     rows = _q(conn, """
         SELECT timestamp, strategy, side, would_fill_price
@@ -336,7 +376,7 @@ def _fmt_price(sym, v):
 
 
 # ======== 各PNG生成 ========
-def _make_png1_overview(since_jst, until_jst, indicators, stats, out_path):
+def _make_png1_overview(since_jst, until_jst, indicators, stats, ls_map, out_path):
     """PNG1: 期間総括 + 銘柄別 相場インジケーター × 戦略別成績"""
     fig = plt.figure(figsize=(14, 16), dpi=110)
     fig.patch.set_facecolor('#fafafa')
@@ -455,38 +495,70 @@ def _make_png1_overview(since_jst, until_jst, indicators, stats, out_path):
             ax.text(0.03, yy - 0.04, val, fontsize=9.5, color='#1a237e',
                     fontweight='bold', va='top')
 
-        # 右半分: 戦略別成績（0.50〜0.98）
-        ax.text(0.50, 0.870, '▼ 戦略別成績（複利% = 期間内の累積成長率）',
-                fontsize=9, fontweight='bold', color='#283593', va='top')
-        # ミニテーブル: 6カラム
-        col_x = {'戦略': 0.520, 'Fill': 0.665, '決済': 0.725,
-                 '勝率': 0.790, 'PnL$': 0.870, 'PnL%': 0.950}
-        tbl_top = 0.815
-        hdr_h = 0.055
-        row_h = 0.075
+        # 右半分: 戦略別成績（0.50〜0.98）Long/Short 内訳付き
+        ax.text(0.50, 0.870,
+                '▼ 戦略別成績 ＋ Long/Short 内訳（PnL% = $100基準）',
+                fontsize=8.8, fontweight='bold', color='#283593', va='top')
+        col_x = {'戦略': 0.505, 'Fill': 0.660, '決済': 0.720,
+                 '勝率': 0.785, 'PnL$': 0.865, 'PnL%': 0.950}
+        tbl_top = 0.840
+        hdr_h = 0.045
+        # 各戦略ブロック: total 1行 + Long 1行 + Short 1行
+        total_row_h = 0.050
+        ls_row_h = 0.042
+        block_h = total_row_h + ls_row_h * 2
         # ヘッダ
         ax.add_patch(plt.Rectangle((0.50, tbl_top - hdr_h), 0.48, hdr_h,
                                     facecolor='#283593', zorder=2))
         hdr_y = tbl_top - hdr_h / 2
         for hname, hx in col_x.items():
-            ax.text(hx, hdr_y, hname, fontsize=8, color='white',
+            ax.text(hx, hdr_y, hname, fontsize=7.8, color='white',
                     va='center',
                     ha='left' if hname == '戦略' else 'center',
                     fontweight='bold', zorder=3)
-        # データ行
+
+        def _draw_row(row_top, row_h, bg, cells, label_color, value_color,
+                      fw_pnl_dollar, pnl_pct_color, font_size, indent=False):
+            row_bot = row_top - row_h
+            ax.add_patch(plt.Rectangle((0.50, row_bot), 0.48, row_h,
+                                        facecolor=bg, edgecolor='#ddd',
+                                        linewidth=0.4, zorder=2))
+            row_mid = (row_top + row_bot) / 2
+            for cname, val in cells.items():
+                if cname == '戦略':
+                    col_txt = label_color
+                    fw = 'bold'
+                    hx = col_x[cname] + (0.015 if indent else 0.0)
+                    ax.text(hx, row_mid, val, fontsize=font_size,
+                            color=col_txt, va='center', ha='left',
+                            fontweight=fw, zorder=3)
+                    continue
+                if cname == 'PnL%':
+                    col_txt = pnl_pct_color
+                    fw = 'bold'
+                elif cname == 'PnL$':
+                    col_txt = value_color
+                    fw = fw_pnl_dollar
+                else:
+                    col_txt = value_color
+                    fw = 'normal'
+                ax.text(col_x[cname], row_mid, val, fontsize=font_size,
+                        color=col_txt, va='center', ha='center',
+                        fontweight=fw, zorder=3)
+
+        # データ: 3戦略 × (total, Long, Short)
+        cursor_top = tbl_top - hdr_h
         for si, st in enumerate(STRATEGIES):
             r = stat_map.get((st, sym))
-            row_top = tbl_top - hdr_h - si * row_h
-            row_bot = row_top - row_h
+            ls = ls_map.get((st, sym))
+
+            # ----- total 行 -----
             if r and r['pnl'] > 0:
-                row_bg = '#e8f5e9'
+                bg = '#e8f5e9'
             elif r and r['pnl'] < 0:
-                row_bg = '#ffebee'
+                bg = '#ffebee'
             else:
-                row_bg = '#f5f5f5'
-            ax.add_patch(plt.Rectangle((0.50, row_bot), 0.48, row_h,
-                                        facecolor=row_bg, edgecolor='#ddd',
-                                        linewidth=0.5, zorder=2))
+                bg = '#f5f5f5'
             if r:
                 wr_s = f"{r['win_rate']:.0f}%" if r['closes'] > 0 else '-'
                 pnl_s = f"{r['pnl']:+.2f}" if r['fills'] > 0 else '-'
@@ -494,22 +566,63 @@ def _make_png1_overview(since_jst, until_jst, indicators, stats, out_path):
                 cells = {'戦略': st, 'Fill': str(r['fills']),
                          '決済': str(r['closes']), '勝率': wr_s,
                          'PnL$': pnl_s, 'PnL%': pct_s}
+                pct_color = ('#2e7d32' if r['pnl'] > 0 else
+                             ('#c62828' if r['pnl'] < 0 else '#555'))
             else:
                 cells = {'戦略': st, 'Fill': '0', '決済': '0',
                          '勝率': '-', 'PnL$': '-', 'PnL%': '-'}
-            row_mid = (row_top + row_bot) / 2
-            for cname, val in cells.items():
-                # PnL%セルは色分け強調
-                if cname == 'PnL%' and r and r['fills'] > 0:
-                    col_txt = '#2e7d32' if r['pnl'] > 0 else ('#c62828' if r['pnl'] < 0 else '#555')
-                    fw = 'bold'
-                else:
-                    col_txt = '#222'
-                    fw = 'bold' if cname == 'PnL$' else 'normal'
-                ax.text(col_x[cname], row_mid, val, fontsize=8.5, color=col_txt,
-                        va='center',
-                        ha='left' if cname == '戦略' else 'center',
-                        fontweight=fw, zorder=3)
+                pct_color = '#555'
+            _draw_row(cursor_top, total_row_h, bg, cells,
+                      label_color='#222', value_color='#222',
+                      fw_pnl_dollar='bold', pnl_pct_color=pct_color,
+                      font_size=8.3, indent=False)
+            cursor_top -= total_row_h
+
+            # ----- Long 行 -----
+            if ls and ls['long_entries'] > 0:
+                l_wr = f"{ls['long_win_rate']:.0f}%" if ls['long_closes'] > 0 else '-'
+                l_pnl_s = f"{ls['long_pnl']:+.2f}" if ls['long_closes'] > 0 else '-'
+                l_pct_s = f"{ls['long_pnl_pct']:+.2f}%" if ls['long_closes'] > 0 else '-'
+                l_cells = {'戦略': '└ Long', 'Fill': str(ls['long_entries']),
+                           '決済': str(ls['long_closes']), '勝率': l_wr,
+                           'PnL$': l_pnl_s, 'PnL%': l_pct_s}
+                l_bg = ('#e3f2fd' if ls['long_pnl'] > 0 else
+                        ('#fce4ec' if ls['long_pnl'] < 0 else '#fafafa'))
+                l_pct_color = ('#2e7d32' if ls['long_pnl'] > 0 else
+                               ('#c62828' if ls['long_pnl'] < 0 else '#888'))
+            else:
+                l_cells = {'戦略': '└ Long', 'Fill': '0', '決済': '0',
+                           '勝率': '-', 'PnL$': '-', 'PnL%': '-'}
+                l_bg = '#fafafa'
+                l_pct_color = '#888'
+            _draw_row(cursor_top, ls_row_h, l_bg, l_cells,
+                      label_color='#1976d2', value_color='#333',
+                      fw_pnl_dollar='normal', pnl_pct_color=l_pct_color,
+                      font_size=7.5, indent=True)
+            cursor_top -= ls_row_h
+
+            # ----- Short 行 -----
+            if ls and ls['short_entries'] > 0:
+                s_wr = f"{ls['short_win_rate']:.0f}%" if ls['short_closes'] > 0 else '-'
+                s_pnl_s = f"{ls['short_pnl']:+.2f}" if ls['short_closes'] > 0 else '-'
+                s_pct_s = f"{ls['short_pnl_pct']:+.2f}%" if ls['short_closes'] > 0 else '-'
+                s_cells = {'戦略': '└ Short', 'Fill': str(ls['short_entries']),
+                           '決済': str(ls['short_closes']), '勝率': s_wr,
+                           'PnL$': s_pnl_s, 'PnL%': s_pct_s}
+                s_bg = ('#e3f2fd' if ls['short_pnl'] > 0 else
+                        ('#fce4ec' if ls['short_pnl'] < 0 else '#fafafa'))
+                s_pct_color = ('#2e7d32' if ls['short_pnl'] > 0 else
+                               ('#c62828' if ls['short_pnl'] < 0 else '#888'))
+            else:
+                s_cells = {'戦略': '└ Short', 'Fill': '0', '決済': '0',
+                           '勝率': '-', 'PnL$': '-', 'PnL%': '-'}
+                s_bg = '#fafafa'
+                s_pct_color = '#888'
+            _draw_row(cursor_top, ls_row_h, s_bg, s_cells,
+                      label_color='#d81b60', value_color='#333',
+                      fw_pnl_dollar='normal', pnl_pct_color=s_pct_color,
+                      font_size=7.5, indent=True)
+            cursor_top -= ls_row_h
 
         # 戦略別所見（カード下端）
         sym_rows = [stat_map.get((st, sym)) for st in STRATEGIES]
@@ -828,6 +941,7 @@ def generate(since_jst, until_jst, out_path):
     conn = sqlite3.connect(DB_PATH)
     try:
         stats = _query_stats(conn, start_iso, end_iso)
+        ls_map = _query_ls_by_symbol(conn, start_iso, end_iso)
         fills_by_symbol = {sym: _query_fills(conn, start_iso, end_iso, sym)
                            for sym in SYMBOLS}
     finally:
@@ -843,7 +957,7 @@ def generate(since_jst, until_jst, out_path):
     p2 = base.with_name(base.stem + '_2_charts.png')
     p3 = base.with_name(base.stem + '_3_strategy.png')
 
-    _make_png1_overview(since_jst, until_jst, indicators, stats, str(p1))
+    _make_png1_overview(since_jst, until_jst, indicators, stats, ls_map, str(p1))
     _make_png2_charts(since_jst, until_jst, fills_by_symbol, str(p2))
     _make_png3_strategy(since_jst, until_jst, indicators, stats, str(p3))
 
