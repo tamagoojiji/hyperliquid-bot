@@ -8,6 +8,23 @@ load_dotenv()
 
 
 @dataclass
+class FeeConfig:
+    """取引コスト設定（Hyperliquid perp 標準ティア想定）"""
+    maker_bps: float = 1.5            # メイカー手数料: 0.015%
+    taker_bps: float = 4.5            # テイカー手数料: 0.045%
+    funding_enabled: bool = True      # funding rate をドライラン損益に反映
+    funding_fetch_interval_sec: int = 3600  # funding は1時間ごと
+
+    @classmethod
+    def from_env(cls) -> "FeeConfig":
+        return cls(
+            maker_bps=float(os.getenv("FEE_MAKER_BPS", "1.5")),
+            taker_bps=float(os.getenv("FEE_TAKER_BPS", "4.5")),
+            funding_enabled=os.getenv("FUNDING_ENABLED", "1") not in ("0", "false", "False"),
+        )
+
+
+@dataclass
 class HLConfig:
     """Hyperliquid接続設定"""
     wallet_address_a: str = ""       # BTC用ウォレットアドレス
@@ -121,6 +138,7 @@ class BotConfig:
     rsi30: RSI30Config = field(default_factory=RSI30Config)
     simple_mm: SimpleMMConfig = field(default_factory=SimpleMMConfig)
     session_bo: SessionBOConfig = field(default_factory=SessionBOConfig)
+    fees: FeeConfig = field(default_factory=FeeConfig.from_env)
 
     @classmethod
     def from_env(cls, strategy: str = "rsi30", symbol: str = "BTC",
@@ -131,6 +149,7 @@ class BotConfig:
             mode=mode,
             hl=HLConfig.from_env(),
             discord_webhook_url=os.getenv("DISCORD_WEBHOOK_URL", ""),
+            fees=FeeConfig.from_env(),
         )
         # ペア別オーバーライド
         if symbol in MM_OVERRIDES and strategy == "simple_mm":

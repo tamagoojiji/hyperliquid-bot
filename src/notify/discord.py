@@ -98,6 +98,9 @@ class DiscordNotifier:
 
     async def notify_daily_summary(self, summary: dict):
         net = summary.get("net_pnl", 0)
+        gross = summary.get("total_pnl", 0)
+        fees = summary.get("total_fees", 0)
+        funding = summary.get("total_funding", 0)
         emoji = "\U0001f4b0" if net >= 0 else "\U0001f4c9"
         pnl_sign = "+" if net >= 0 else ""
         msg = (
@@ -105,6 +108,7 @@ class DiscordNotifier:
             f"取引: `{summary.get('trade_count', 0)}回` "
             f"(勝{summary.get('win_count', 0)} 負{summary.get('loss_count', 0)}) "
             f"勝率`{summary.get('win_rate', 0):.0f}%`\n"
+            f"粗損益: `${gross:,.4f}` | 手数料: `-${fees:,.4f}` | funding: `${-funding:,.4f}`\n"
             f"{emoji} 純損益: `{pnl_sign}${net:,.4f}`"
         )
         await self._queue.put(msg)

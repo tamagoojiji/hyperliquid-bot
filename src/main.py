@@ -25,6 +25,12 @@ from src.data.db import Database
 from src.notify.discord import DiscordNotifier
 from src.risk.position import PositionTracker
 from src.risk.risk_manager import RiskManager
+from src.risk.dry_run_pnl import (
+    VirtualPosition,
+    apply_funding,
+    compute_fee,
+    compute_net_pnl,
+)
 from src.utils.logger import get_logger
 from src.utils.reconcile import reconcile_on_startup
 
@@ -62,6 +68,15 @@ class Bot:
         # キャンドルビルダー
         self.candle_5m = CandleBuilder(interval_seconds=300)
         self.candle_30m = CandleBuilder(interval_seconds=1800)
+
+        # ドライラン用: 仮想ポジション + funding rate キャッシュ
+        self._virtual_positions: dict[str, VirtualPosition] = {}
+        self._current_funding_rate_1h: float = 0.0
+        self._virtual_pnl_total: float = 0.0
+        self._virtual_fees_total: float = 0.0
+        self._virtual_funding_total: float = 0.0
+        self._virtual_trades: int = 0
+        self._virtual_wins: int = 0
 
     def _create_strategy(self):
         if self.cfg.strategy == "rsi30":
@@ -151,6 +166,10 @@ class Bot:
         if self.cfg.strategy in ("simple_mm", "full_mm"):
             tasks.append(asyncio.create_task(self._mm_quote_loop()))
 
+        # ドライラン時は funding rate 適用ループを起動
+        if self.cfg.mode == "dry" and self.cfg.fees.funding_enabled:
+            tasks.append(asyncio.create_task(self._funding_loop()))
+
         try:
             await asyncio.gather(*tasks)
         except asyncio.CancelledError:
@@ -228,6 +247,9 @@ class Bot:
 
             # リアルタイムSL/TP監視
             self.strategy.on_trade(price, size, ts)
+            # ドライラン: 戦略が発行した exit イベントを処理
+            if self.cfg.mode == "dry":
+                await self._handle_virtual_exit()
 
             # MM戦略: 価格更新
             if self.cfg.strategy in ("simple_mm", "full_mm"):
@@ -283,16 +305,37 @@ class Bot:
                     status="placed",
                 )
         else:
-            # ドライラン: shadow_fillsに記録
+            # ドライラン: 仮想ポジション作成 + 手数料記録
+            is_maker = True  # RSI30は post-only limit を使用
+            entry_fee = compute_fee(
+                signal.size_usd, is_maker,
+                self.cfg.fees.maker_bps, self.cfg.fees.taker_bps,
+            )
+            size_base = signal.size_usd / signal.price
+            # 仮想ポジション追跡は exit イベント発行に対応した戦略のみ
+            if self.cfg.strategy == "rsi30":
+                self._virtual_positions[self.cfg.symbol] = VirtualPosition(
+                    strategy=self.strategy.name,
+                    symbol=self.cfg.symbol,
+                    side=side,
+                    entry_price=signal.price,
+                    size=size_base,
+                    entry_time=time.time(),
+                    is_maker_entry=is_maker,
+                    entry_fee=entry_fee,
+                )
+                self._virtual_fees_total += entry_fee
             await self.db.insert_shadow_fill(
                 strategy=self.strategy.name,
                 symbol=self.cfg.symbol,
                 side=side,
                 signal_price=signal.price,
                 would_fill_price=signal.price,
-                size=signal.size_usd / signal.price,
+                size=size_base,
                 estimated_pnl=0.0,
-                fill_model="touch",
+                fill_model="entry",
+                fee=entry_fee,
+                funding=0.0,
             )
 
         # Discord通知（stateを渡して詳細表示）
@@ -314,6 +357,59 @@ class Bot:
             f"mode={self.cfg.mode}"
         )
 
+    async def _handle_virtual_exit(self):
+        """戦略が発行した exit を受け取り、手数料 + funding を差し引いて記録"""
+        evt = self.strategy.consume_exit_event()
+        if evt is None:
+            return
+        vp = self._virtual_positions.pop(self.cfg.symbol, None)
+        if vp is None:
+            return
+
+        exit_notional = abs(vp.size) * evt.exit_price
+        exit_fee = compute_fee(
+            exit_notional, evt.is_maker,
+            self.cfg.fees.maker_bps, self.cfg.fees.taker_bps,
+        )
+        result = compute_net_pnl(vp, evt.exit_price, exit_fee)
+
+        self._virtual_fees_total += exit_fee
+        self._virtual_funding_total += result["funding"]
+        self._virtual_pnl_total += result["net_pnl"]
+        self._virtual_trades += 1
+        if result["net_pnl"] > 0:
+            self._virtual_wins += 1
+
+        await self.db.insert_shadow_fill(
+            strategy=self.strategy.name,
+            symbol=self.cfg.symbol,
+            side="sell" if vp.side == "buy" else "buy",
+            signal_price=evt.exit_price,
+            would_fill_price=evt.exit_price,
+            size=abs(vp.size),
+            estimated_pnl=result["net_pnl"],
+            fill_model=f"exit_{evt.reason}",
+            fee=exit_fee,
+            funding=result["funding"],
+        )
+
+        hold_sec = time.time() - vp.entry_time
+        await self.discord.notify_exit(
+            strategy=self.strategy.name,
+            symbol=self.cfg.symbol,
+            side=vp.side,
+            price=evt.exit_price,
+            size=exit_notional,
+            pnl=result["net_pnl"],
+            hold_time=f"{int(hold_sec / 60)}m",
+            total_pnl=self._virtual_pnl_total,
+        )
+        log.info(
+            f"[dry exit] {evt.reason} raw={result['raw_pnl']:.4f} "
+            f"fee={result['total_fee']:.4f} funding={result['funding']:.4f} "
+            f"net={result['net_pnl']:.4f}"
+        )
+
     async def _mm_quote_loop(self):
         """MM戦略: 仮想約定シミュレーション付きドライラン
 
@@ -326,22 +422,15 @@ class Bot:
         """
         interval = self.cfg.simple_mm.update_interval_ms / 1000
 
-        # 仮想ポジション管理
-        virtual_pos = 0.0        # +ロング / -ショート
-        virtual_entry = 0.0      # エントリー価格
-        virtual_pnl = 0.0        # 累計PnL
-        virtual_trades = 0       # 取引回数
-        virtual_wins = 0         # 勝ち回数
-
-        # 累計計測の開始時刻（JST）
-        # SOL: 2026-04-16 00:00 JST = 2026-04-15 15:00 UTC
-        # BTC: 2026-04-16 07:00 JST = 2026-04-15 22:00 UTC
-        from datetime import datetime, timezone, timedelta
+        from datetime import datetime, timezone
         if self.cfg.symbol == "SOL":
             pnl_start_utc = datetime(2026, 4, 15, 15, 0, 0, tzinfo=timezone.utc).timestamp()
         else:  # BTC
             pnl_start_utc = datetime(2026, 4, 15, 22, 0, 0, tzinfo=timezone.utc).timestamp()
         pnl_started = False
+
+        maker_bps = self.cfg.fees.maker_bps
+        taker_bps = self.cfg.fees.taker_bps
 
         while self._running:
             await asyncio.sleep(interval)
@@ -350,20 +439,20 @@ class Bot:
             if not self.strategy.ready():
                 continue
 
-            # 開始時刻まで待機（quoteは計算するが累計に含めない）
             if not pnl_started:
                 if time.time() >= pnl_start_utc:
                     pnl_started = True
-                    virtual_pnl = 0.0
-                    virtual_trades = 0
-                    virtual_wins = 0
+                    self._virtual_pnl_total = 0.0
+                    self._virtual_fees_total = 0.0
+                    self._virtual_funding_total = 0.0
+                    self._virtual_trades = 0
+                    self._virtual_wins = 0
                     log.info(f"PnL tracking started for {self.cfg.symbol}")
 
             quotes = self.strategy.get_quotes()
             if not quotes["should_quote"]:
                 continue
 
-            # quote価格を取得
             levels = quotes.get("levels")
             if levels:
                 l0 = levels[0]
@@ -380,107 +469,116 @@ class Bot:
             if bid <= 0 or ask <= 0:
                 continue
 
-            # 現在のHL価格を取得
             current = self.candle_5m.current
             if not current:
                 continue
             hl_price = current.close
 
-            # === 仮想約定判定 ===
+            vp = self._virtual_positions.get(self.cfg.symbol)
 
-            if virtual_pos == 0.0:
-                # ポジションなし → bid/ask両方で待機
+            # === 仮想約定判定（MM は両側とも maker 想定） ===
+
+            if vp is None:
                 if hl_price <= bid and bid_sz > 0:
-                    # 買い約定（誰かがbidに売ってきた）
-                    virtual_pos = bid_sz
-                    virtual_entry = bid
-                    state = self.strategy.get_state() if hasattr(self.strategy, 'get_state') else None
-                    await self.discord.notify_entry(
-                        strategy=self.strategy.name,
-                        symbol=self.cfg.symbol,
-                        side="buy",
-                        price=bid,
-                        size=bid_sz * bid,
-                        state=state,
-                        balance=100.0,
+                    await self._mm_open_virtual(
+                        side="buy", price=bid, size_base=bid_sz, is_maker=True,
+                        maker_bps=maker_bps, taker_bps=taker_bps,
                     )
-                    await self.db.insert_shadow_fill(
-                        strategy=self.strategy.name, symbol=self.cfg.symbol,
-                        side="buy", signal_price=bid, would_fill_price=bid,
-                        size=bid_sz, estimated_pnl=0.0, fill_model="mm_sim",
-                    )
-
                 elif hl_price >= ask and ask_sz > 0:
-                    # 売り約定（誰かがaskに買ってきた）
-                    virtual_pos = -ask_sz
-                    virtual_entry = ask
-                    state = self.strategy.get_state() if hasattr(self.strategy, 'get_state') else None
-                    await self.discord.notify_entry(
-                        strategy=self.strategy.name,
-                        symbol=self.cfg.symbol,
-                        side="sell",
-                        price=ask,
-                        size=ask_sz * ask,
-                        state=state,
-                        balance=100.0,
+                    await self._mm_open_virtual(
+                        side="sell", price=ask, size_base=ask_sz, is_maker=True,
+                        maker_bps=maker_bps, taker_bps=taker_bps,
                     )
-                    await self.db.insert_shadow_fill(
-                        strategy=self.strategy.name, symbol=self.cfg.symbol,
-                        side="sell", signal_price=ask, would_fill_price=ask,
-                        size=ask_sz, estimated_pnl=0.0, fill_model="mm_sim",
-                    )
+            elif vp.side == "buy" and hl_price >= ask:
+                await self._mm_close_virtual(
+                    vp=vp, exit_price=ask, is_maker=True,
+                    maker_bps=maker_bps, taker_bps=taker_bps,
+                )
+            elif vp.side == "sell" and hl_price <= bid:
+                await self._mm_close_virtual(
+                    vp=vp, exit_price=bid, is_maker=True,
+                    maker_bps=maker_bps, taker_bps=taker_bps,
+                )
 
-            elif virtual_pos > 0:
-                # ロング中 → ask価格まで上がったら決済
-                if hl_price >= ask:
-                    pnl = (ask - virtual_entry) * virtual_pos
-                    virtual_pnl += pnl
-                    virtual_trades += 1
-                    if pnl > 0:
-                        virtual_wins += 1
-                    await self.discord.notify_exit(
-                        strategy=self.strategy.name,
-                        symbol=self.cfg.symbol,
-                        side="buy",
-                        price=ask,
-                        size=virtual_pos * ask,
-                        pnl=pnl,
-                        hold_time="MM",
-                        total_pnl=virtual_pnl,
-                    )
-                    await self.db.insert_shadow_fill(
-                        strategy=self.strategy.name, symbol=self.cfg.symbol,
-                        side="sell", signal_price=ask, would_fill_price=ask,
-                        size=virtual_pos, estimated_pnl=pnl, fill_model="mm_sim_exit",
-                    )
-                    virtual_pos = 0.0
-                    virtual_entry = 0.0
+    async def _mm_open_virtual(self, side, price, size_base, is_maker, maker_bps, taker_bps):
+        notional = size_base * price
+        entry_fee = compute_fee(notional, is_maker, maker_bps, taker_bps)
+        self._virtual_positions[self.cfg.symbol] = VirtualPosition(
+            strategy=self.strategy.name,
+            symbol=self.cfg.symbol,
+            side=side,
+            entry_price=price,
+            size=size_base,
+            entry_time=time.time(),
+            is_maker_entry=is_maker,
+            entry_fee=entry_fee,
+        )
+        self._virtual_fees_total += entry_fee
+        state = self.strategy.get_state() if hasattr(self.strategy, 'get_state') else None
+        await self.discord.notify_entry(
+            strategy=self.strategy.name, symbol=self.cfg.symbol,
+            side=side, price=price, size=notional,
+            state=state, balance=100.0,
+        )
+        await self.db.insert_shadow_fill(
+            strategy=self.strategy.name, symbol=self.cfg.symbol,
+            side=side, signal_price=price, would_fill_price=price,
+            size=size_base, estimated_pnl=0.0, fill_model="mm_sim",
+            fee=entry_fee, funding=0.0,
+        )
 
-            elif virtual_pos < 0:
-                # ショート中 → bid価格まで下がったら決済
-                if hl_price <= bid:
-                    pnl = (virtual_entry - bid) * abs(virtual_pos)
-                    virtual_pnl += pnl
-                    virtual_trades += 1
-                    if pnl > 0:
-                        virtual_wins += 1
-                    await self.discord.notify_exit(
-                        strategy=self.strategy.name,
-                        symbol=self.cfg.symbol,
-                        side="sell",
-                        price=bid,
-                        size=abs(virtual_pos) * bid,
-                        pnl=pnl,
-                        hold_time="MM",
-                        total_pnl=virtual_pnl,
-                    )
-                    await self.db.insert_shadow_fill(
-                        strategy=self.strategy.name, symbol=self.cfg.symbol,
-                        side="buy", signal_price=bid, would_fill_price=bid,
-                        size=abs(virtual_pos), estimated_pnl=pnl, fill_model="mm_sim_exit",
-                    )
-                    virtual_pos = 0.0
-                    virtual_entry = 0.0
+    async def _mm_close_virtual(self, vp, exit_price, is_maker, maker_bps, taker_bps):
+        exit_notional = abs(vp.size) * exit_price
+        exit_fee = compute_fee(exit_notional, is_maker, maker_bps, taker_bps)
+        result = compute_net_pnl(vp, exit_price, exit_fee)
+
+        self._virtual_fees_total += exit_fee
+        self._virtual_funding_total += result["funding"]
+        self._virtual_pnl_total += result["net_pnl"]
+        self._virtual_trades += 1
+        if result["net_pnl"] > 0:
+            self._virtual_wins += 1
+
+        await self.discord.notify_exit(
+            strategy=self.strategy.name, symbol=self.cfg.symbol,
+            side=vp.side, price=exit_price, size=exit_notional,
+            pnl=result["net_pnl"], hold_time="MM",
+            total_pnl=self._virtual_pnl_total,
+        )
+        await self.db.insert_shadow_fill(
+            strategy=self.strategy.name, symbol=self.cfg.symbol,
+            side="sell" if vp.side == "buy" else "buy",
+            signal_price=exit_price, would_fill_price=exit_price,
+            size=abs(vp.size), estimated_pnl=result["net_pnl"],
+            fill_model="mm_sim_exit", fee=exit_fee, funding=result["funding"],
+        )
+        self._virtual_positions.pop(self.cfg.symbol, None)
+        log.info(
+            f"[mm exit] raw={result['raw_pnl']:.4f} fee={result['total_fee']:.4f} "
+            f"funding={result['funding']:.4f} net={result['net_pnl']:.4f}"
+        )
+
+    async def _funding_loop(self):
+        """1時間ごとに funding rate を取得し、open中の仮想ポジションに適用"""
+        interval = self.cfg.fees.funding_fetch_interval_sec
+        while self._running:
+            await asyncio.sleep(interval)
+            rate = self.hl.get_current_funding_rate(self.cfg.symbol)
+            if rate is None:
+                continue
+            self._current_funding_rate_1h = rate
+            vp = self._virtual_positions.get(self.cfg.symbol)
+            if vp is None:
+                continue
+            current = self.candle_5m.current
+            if not current:
+                continue
+            delta = apply_funding(vp, current.close, rate)
+            self._virtual_funding_total += delta
+            log.info(
+                f"[funding] rate={rate*100:.4f}% applied to {vp.side} "
+                f"notional={abs(vp.size)*current.close:.2f} delta={delta:.4f}"
+            )
 
     async def _main_loop(self):
         """メインループ — 状態監視"""
@@ -512,7 +610,10 @@ class Bot:
             tomorrow = (int(now / 86400) + 1) * 86400
             await asyncio.sleep(tomorrow - now + 60)  # 1分の余裕
 
-            summary = await self.db.get_daily_summary(self.strategy.name)
+            if self.cfg.mode == "dry":
+                summary = await self.db.get_shadow_daily_summary(self.strategy.name)
+            else:
+                summary = await self.db.get_daily_summary(self.strategy.name)
             await self.discord.notify_daily_summary(summary)
 
     async def _position_sync_loop(self):

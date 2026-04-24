@@ -118,6 +118,29 @@ class HyperliquidClient:
             log.error(f"Failed to get balance: {e}")
             return 0.0
 
+    def get_current_funding_rate(self, symbol: str) -> float | None:
+        """現在の funding rate を取得（1時間単位の係数、例 0.00001 = 0.001%/h）
+
+        Hyperliquid の meta_and_asset_ctxs は universe と並列に assetCtx を返す。
+        assetCtx には `funding` フィールド（文字列、1h レート）が含まれる。
+        """
+        try:
+            meta_ctx = self._info.meta_and_asset_ctxs()
+            if not isinstance(meta_ctx, list) or len(meta_ctx) < 2:
+                return None
+            universe = meta_ctx[0].get("universe", [])
+            ctxs = meta_ctx[1]
+            for asset, ctx in zip(universe, ctxs):
+                if asset.get("name") == symbol:
+                    funding_str = ctx.get("funding")
+                    if funding_str is None:
+                        return None
+                    return float(funding_str)
+            return None
+        except Exception as e:
+            log.error(f"Failed to get funding rate for {symbol}: {e}")
+            return None
+
     def get_candles(self, symbol: str, interval: str, limit: int = 500) -> list[dict]:
         """ヒストリカルキャンドルデータ取得"""
         try:

@@ -2,7 +2,7 @@
 
 from collections import deque
 
-from src.strategies.base import BaseStrategy, Signal, SignalType
+from src.strategies.base import BaseStrategy, ExitEvent, Signal, SignalType
 from src.indicators.rsi_channel import RSIChannel
 from src.indicators.bollinger import BollingerBands
 from src.indicators.ema import EMA
@@ -80,16 +80,26 @@ class RSI30Strategy(BaseStrategy):
         if not self._has_position:
             return
 
-        if self._position_side == "buy":
+        side = self._position_side
+        if side == "buy":
             if price <= self._stop_loss:
+                self._emit_exit(side, self._stop_loss, "stop_loss", is_maker=False)
                 self._close_position("stop_loss")
             elif price >= self._take_profit:
+                self._emit_exit(side, self._take_profit, "take_profit", is_maker=True)
                 self._close_position("take_profit")
-        elif self._position_side == "sell":
+        elif side == "sell":
             if price >= self._stop_loss:
+                self._emit_exit(side, self._stop_loss, "stop_loss", is_maker=False)
                 self._close_position("stop_loss")
             elif price <= self._take_profit:
+                self._emit_exit(side, self._take_profit, "take_profit", is_maker=True)
                 self._close_position("take_profit")
+
+    def _emit_exit(self, side: str, price: float, reason: str, is_maker: bool):
+        self._pending_exit = ExitEvent(
+            side=side, exit_price=price, reason=reason, is_maker=is_maker
+        )
 
     def on_candle(self, candle: Candle) -> Signal:
         """30分足キャンドル確定時にシグナル判定"""
