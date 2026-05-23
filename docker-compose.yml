@@ -24,27 +24,27 @@ services:
     container_name: bot-sol-rsi
     command: python -m src.main --strategy rsi30 --symbol SOL --mode dry
 
-  # シンプルMM
-  bot-btc-mm:
-    <<: *bot-common
-    container_name: bot-btc-mm
-    command: python -m src.main --strategy simple_mm --symbol BTC --mode dry
+  # シンプルMM — 手数料負けのため停止中（2026-05-22）
+  # bot-btc-mm:
+  #   <<: *bot-common
+  #   container_name: bot-btc-mm
+  #   command: python -m src.main --strategy simple_mm --symbol BTC --mode dry
+  #
+  # bot-sol-mm:
+  #   <<: *bot-common
+  #   container_name: bot-sol-mm
+  #   command: python -m src.main --strategy simple_mm --symbol SOL --mode dry
 
-  bot-sol-mm:
-    <<: *bot-common
-    container_name: bot-sol-mm
-    command: python -m src.main --strategy simple_mm --symbol SOL --mode dry
-
-  # フルスペックMM（Temari型）
-  bot-btc-fullmm:
-    <<: *bot-common
-    container_name: bot-btc-fullmm
-    command: python -m src.main --strategy full_mm --symbol BTC --mode dry
-
-  bot-sol-fullmm:
-    <<: *bot-common
-    container_name: bot-sol-fullmm
-    command: python -m src.main --strategy full_mm --symbol SOL --mode dry
+  # フルスペックMM（Temari型）— 手数料負けのため停止中（2026-05-22）
+  # bot-btc-fullmm:
+  #   <<: *bot-common
+  #   container_name: bot-btc-fullmm
+  #   command: python -m src.main --strategy full_mm --symbol BTC --mode dry
+  #
+  # bot-sol-fullmm:
+  #   <<: *bot-common
+  #   container_name: bot-sol-fullmm
+  #   command: python -m src.main --strategy full_mm --symbol SOL --mode dry
 
   # ピボットバウンス
   bot-btc-pivot:

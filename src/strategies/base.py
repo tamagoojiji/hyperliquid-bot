@@ -19,6 +19,9 @@ class Signal:
     stop_loss: float = 0.0
     take_profit: float = 0.0
     reason: str = ""
+    # 現状は backtest engine の手数料計算のみで参照される。runtime（src/main.py）の
+    # ドライラン執行経路は is_maker=True 相当を固定で使うため runtime 動作には影響しない。
+    is_maker: bool = False
 
 
 @dataclass
