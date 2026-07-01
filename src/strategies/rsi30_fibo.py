@@ -64,6 +64,11 @@ class RSI30FiboStrategy(BaseStrategy):
         self._prev_filter_ema = self.filter_ema.value if self.filter_ema.ready else 0.0
         self.filter_ema.update(candle.close)
 
+    def reset_position_state(self):
+        super().reset_position_state()
+        self._signal_armed_buy = False
+        self._signal_armed_sell = False
+
     def on_trade(self, price: float, size: float, timestamp: float):
         if not self._has_position:
             return

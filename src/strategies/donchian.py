@@ -34,6 +34,10 @@ class DonchianStrategy(BaseStrategy):
     def name(self) -> str:
         return "donchian"
 
+    def reset_position_state(self):
+        super().reset_position_state()
+        self._trail_stop = 0.0
+
     def ready(self) -> bool:
         return self.channel.ready and self.atr.ready
 

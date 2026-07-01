@@ -77,6 +77,11 @@ class RSI30Strategy(BaseStrategy):
             and self.trend_ema.ready
         )
 
+    def reset_position_state(self):
+        super().reset_position_state()
+        self._signal_armed_buy = False
+        self._signal_armed_sell = False
+
     def on_trade(self, price: float, size: float, timestamp: float):
         """リアルタイムトレードデータで利確/損切りチェック"""
         if not self._has_position:

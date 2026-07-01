@@ -298,9 +298,11 @@ class Bot:
 
             # リアルタイムSL/TP監視
             self.strategy.on_trade(price, size, ts)
-            # ドライラン: 戦略が発行した exit イベントを処理
+            # 戦略が発行した exit イベントを処理（dry=仮想決済 / live=reduce-only実注文）
             if self.cfg.mode == "dry":
                 await self._handle_virtual_exit()
+            else:
+                await self._handle_live_exit()
 
             # MM戦略: 価格更新
             if self.cfg.strategy in ("simple_mm", "full_mm"):
@@ -485,6 +487,55 @@ class Bot:
             f"fee={result['total_fee']:.4f} funding={result['funding']:.4f} "
             f"net={result['net_pnl']:.4f}"
         )
+
+    async def _handle_live_exit(self):
+        """live: 戦略のSL/TP発火を実際のreduce-only成行決済に変換する"""
+        evt = self.strategy.consume_exit_event()
+        if evt is None:
+            return
+        pos = self.position_tracker.get(self.cfg.symbol)
+        if pos.size == 0:
+            log.warning(f"Live exit ({evt.reason}) but no exchange position, skipping")
+            return
+        # 保有と逆方向のreduce-only成行でクローズ
+        is_buy = pos.size < 0
+        result = await self.hl.place_order(
+            symbol=self.cfg.symbol,
+            is_buy=is_buy,
+            size=abs(pos.size),
+            order_type="market",
+            reduce_only=True,
+        )
+        if result:
+            await self.db.insert_order(
+                strategy=self.strategy.name,
+                symbol=self.cfg.symbol,
+                side="buy" if is_buy else "sell",
+                price=evt.exit_price,
+                size=abs(pos.size),
+                order_type="market",
+                status="placed",
+            )
+            await self.discord.notify_exit(
+                strategy=self.strategy.name,
+                symbol=self.cfg.symbol,
+                side=evt.side,
+                price=evt.exit_price,
+                size=abs(pos.size) * evt.exit_price,
+                pnl=0.0,  # 実現PnLはposition同期・fillsで確定する
+                hold_time="-",
+                total_pnl=self.risk.net_pnl,
+            )
+            log.info(
+                f"[live exit] {evt.reason} reduce-only market close "
+                f"size={abs(pos.size)} ref_price={evt.exit_price:.2f}"
+            )
+        else:
+            log.error(f"Live exit order FAILED ({evt.reason}) — position remains open!")
+            await self.discord.notify_error(
+                f"決済注文失敗: {self.cfg.symbol} {evt.reason} — ポジションが残っています",
+                "手動確認が必要",
+            )
 
     async def _mm_quote_loop(self):
         """MM戦略: 仮想約定シミュレーション付きドライラン

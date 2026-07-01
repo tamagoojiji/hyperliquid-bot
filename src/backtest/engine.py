@@ -93,6 +93,39 @@ def run_backtest(
     open_size_usd: float = 0.0
     open_is_maker: bool = False
 
+    def _settle(exit_evt, ts: float):
+        """ExitEventでオープンポジションを決済し、Trade記録・残高更新を行う"""
+        nonlocal balance, open_entry_ts, open_entry_price, open_side, open_size_usd, open_is_maker
+        exit_price = exit_evt.exit_price
+        exit_fee_bps = maker_bps if exit_evt.is_maker else taker_bps
+        entry_fee_bps = maker_bps if open_is_maker else taker_bps
+        entry_fee = open_size_usd * (entry_fee_bps / 10_000.0)
+        exit_fee = open_size_usd * (exit_fee_bps / 10_000.0)
+        fee_total = entry_fee + exit_fee
+        if open_side == "buy":
+            gross = open_size_usd * (exit_price / open_entry_price - 1.0)
+        else:
+            gross = open_size_usd * (1.0 - exit_price / open_entry_price)
+        pnl = gross - fee_total
+        balance += pnl
+        trades.append(Trade(
+            entry_ts=open_entry_ts,
+            exit_ts=ts,
+            side=open_side,
+            entry_price=open_entry_price,
+            exit_price=exit_price,
+            size_usd=open_size_usd,
+            reason=exit_evt.reason,
+            fee_usd=fee_total,
+            pnl_usd=pnl,
+        ))
+        equity_curve.append((ts, balance))
+        open_entry_ts = None
+        open_side = ""
+        open_entry_price = 0.0
+        open_size_usd = 0.0
+        open_is_maker = False
+
     for candle in entry_candles:
         # 確定済みフィルター足を先に流す（フィルター足クローズ ≤ エントリー足クローズ）
         while (filter_idx < len(filter_sorted)
@@ -107,38 +140,17 @@ def run_backtest(
         if open_entry_ts is not None:
             exit_evt = _walk_intrabar(candle, strategy)
             if exit_evt is not None:
-                exit_price = exit_evt.exit_price
-                exit_fee_bps = maker_bps if exit_evt.is_maker else taker_bps
-                entry_fee_bps = maker_bps if open_is_maker else taker_bps
-                entry_fee = open_size_usd * (entry_fee_bps / 10_000.0)
-                exit_fee = open_size_usd * (exit_fee_bps / 10_000.0)
-                fee_total = entry_fee + exit_fee
-                if open_side == "buy":
-                    gross = open_size_usd * (exit_price / open_entry_price - 1.0)
-                else:
-                    gross = open_size_usd * (1.0 - exit_price / open_entry_price)
-                pnl = gross - fee_total
-                balance += pnl
-                trades.append(Trade(
-                    entry_ts=open_entry_ts,
-                    exit_ts=candle.timestamp,
-                    side=open_side,
-                    entry_price=open_entry_price,
-                    exit_price=exit_price,
-                    size_usd=open_size_usd,
-                    reason=exit_evt.reason,
-                    fee_usd=fee_total,
-                    pnl_usd=pnl,
-                ))
-                equity_curve.append((candle.timestamp, balance))
-                open_entry_ts = None
-                open_side = ""
-                open_entry_price = 0.0
-                open_size_usd = 0.0
-                open_is_maker = False
+                _settle(exit_evt, candle.timestamp)
 
         # キャンドル確定 → エントリーシグナル判定
         signal: Signal = strategy.on_candle(candle)
+
+        # on_candle内で発火した決済（macd_cross / force_close 等）を即時消費する
+        # （次キャンドルまで持ち越すと exit_ts がずれ、期間末尾では二重計上になる）
+        if open_entry_ts is not None:
+            exit_evt = strategy.consume_exit_event()
+            if exit_evt is not None:
+                _settle(exit_evt, candle.timestamp)
 
         # 新規エントリー（既存ポジが無いとき）
         if signal.type in (SignalType.BUY, SignalType.SELL) and open_entry_ts is None:

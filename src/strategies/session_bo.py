@@ -66,24 +66,32 @@ class SessionBreakoutStrategy(BaseStrategy):
         self._entered_today = False
         log.info(f"{self.symbol}: new UTC day {day}, range reset")
 
+    def reset_position_state(self):
+        """幻ポジション破棄。TP1フラグ等も含めて初期化（_entered_todayは維持）"""
+        self._reset_position()
+        self._pending_exit = None
+
     def on_trade(self, price: float, size: float, timestamp: float):
         if not self._has_position:
             return
 
+        # TP1とTP2を同一ティックで跨いだ場合もTP2まで再評価する
         if self._position_side == "buy":
             if price <= self._stop_loss:
                 self._close_position("stop_loss", price)
-            elif not self._tp1_hit and price >= self._take_profit_1:
+                return
+            if not self._tp1_hit and price >= self._take_profit_1:
                 self._partial_close("take_profit_1", self._take_profit_1)
-            elif self._tp1_hit and price >= self._take_profit_2:
-                self._close_position("take_profit_2", price)
+            if self._tp1_hit and price >= self._take_profit_2:
+                self._close_position("take_profit_2", self._take_profit_2)
         elif self._position_side == "sell":
             if price >= self._stop_loss:
                 self._close_position("stop_loss", price)
-            elif not self._tp1_hit and price <= self._take_profit_1:
+                return
+            if not self._tp1_hit and price <= self._take_profit_1:
                 self._partial_close("take_profit_1", self._take_profit_1)
-            elif self._tp1_hit and price <= self._take_profit_2:
-                self._close_position("take_profit_2", price)
+            if self._tp1_hit and price <= self._take_profit_2:
+                self._close_position("take_profit_2", self._take_profit_2)
 
     def on_candle(self, candle: Candle) -> Signal:
         """5分足確定時"""

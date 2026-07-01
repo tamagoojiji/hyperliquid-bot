@@ -53,6 +53,14 @@ class PivotBounceStrategy(BaseStrategy):
     def ready(self) -> bool:
         return self.pivot.ready and self.rsi.ready and self.filter_ema.ready
 
+    def reset_position_state(self):
+        super().reset_position_state()
+        self._signal_armed_buy = False
+        self._signal_armed_sell = False
+        self._armed_line_buy = ""
+        self._armed_line_sell = ""
+        self._entry_line = ""
+
     def on_filter_candle(self, candle: Candle):
         """30分足確定時"""
         self._prev_filter_ema = self.filter_ema.value if self.filter_ema.ready else 0.0

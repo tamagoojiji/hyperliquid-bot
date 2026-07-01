@@ -53,14 +53,18 @@ class BaseStrategy(ABC):
         )
 
     def reset_position_state(self):
-        """ウォームアップ中に立った幻シグナルのポジション状態を破棄する。
+        """幻シグナルのポジション状態を破棄する（warmup後・シグナル拒否時・発注失敗時）。
 
         実注文・仮想ポジションを伴わない内部状態だけが残ると
-        以後のエントリーが恒久ブロックされるため、履歴ロード後に呼ぶ。
+        以後のエントリーが恒久ブロックされるため必ず呼ぶ。
+        固有の状態（トレーリング・部分利確フラグ等）を持つ戦略はオーバーライドする。
         """
         self._has_position = False
         self._position_side = ""
         self._pending_exit = None
+        for attr in ("_entry_price", "_stop_loss", "_take_profit"):
+            if hasattr(self, attr):
+                setattr(self, attr, 0.0)
 
     @property
     @abstractmethod
