@@ -15,13 +15,21 @@ from src.config import FeeConfig
 
 # 戦略名 → (クラス, エントリー足, フィルター足 or None)
 #
-# このレジストリには on_trade() で ExitEvent を確実に発行する戦略のみ載せる。
-# engine.run_backtest は consume_exit_event() を唯一の決済ソースとしているため、
-# 内部で _has_position を閉じるだけの戦略・部分利確を伴う戦略（session_bo 等）は
-# 現状の engine では成績が壊れる。互換確認後に順次追加する。
+# このレジストリには ExitEvent を確実に発行する戦略のみ載せる
+# （engine.run_backtest は consume_exit_event() を唯一の決済ソースとする）。
+# 2026-07-02: 全directional戦略が _close_position で ExitEvent を発行するようになった。
+# session_bo の部分利確はTP1加重平均価格の単一exitとして表現される。
 _STRATEGY_REGISTRY: dict[str, tuple[str, str, str | None]] = {
-    "rsi30":  ("src.strategies.rsi30.RSI30Strategy", "30m", None),
-    "bb_rsi": ("src.strategies.bb_rsi.BBRSIStrategy", "30m", None),
+    "rsi30":        ("src.strategies.rsi30.RSI30Strategy", "30m", None),
+    "bb_rsi":       ("src.strategies.bb_rsi.BBRSIStrategy", "30m", None),
+    "pivot_bounce": ("src.strategies.pivot_bounce.PivotBounceStrategy", "5m", "30m"),
+    "breakout":     ("src.strategies.breakout.BreakoutStrategy", "5m", "30m"),
+    "macd_vwap":    ("src.strategies.macd_vwap.MACDVWAPStrategy", "5m", "30m"),
+    "rsi30_fibo":   ("src.strategies.rsi30_fibo.RSI30FiboStrategy", "5m", "30m"),
+    "pivot_bb":     ("src.strategies.pivot_bb.PivotBBStrategy", "5m", "30m"),
+    "pivot_vwap":   ("src.strategies.pivot_vwap.PivotVWAPStrategy", "5m", "30m"),
+    "session_bo":   ("src.strategies.session_bo.SessionBreakoutStrategy", "5m", None),
+    "donchian":     ("src.strategies.donchian.DonchianStrategy", "1d", None),
 }
 
 

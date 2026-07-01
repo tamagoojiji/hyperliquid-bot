@@ -2,11 +2,12 @@
 
 from collections import deque
 
-from src.strategies.base import BaseStrategy, ExitEvent, Signal, SignalType
+from src.strategies.base import BaseStrategy, Signal, SignalType
 from src.indicators.rsi_channel import RSIChannel
 from src.indicators.bollinger import BollingerBands
 from src.indicators.ema import EMA
 from src.indicators.atr import ATR
+from src.indicators.adx import ADX
 from src.data.candle_builder import Candle
 from src.config import RSI30Config
 from src.utils.logger import get_logger
@@ -43,6 +44,7 @@ class RSI30Strategy(BaseStrategy):
         )
         self.ema = EMA(period=self.cfg.ema_period)
         self.atr = ATR(period=self.cfg.atr_period)
+        self.adx = ADX(period=self.cfg.adx_period)
 
         # 方向フィルター用の200EMA（同じ30分足）
         self.trend_ema = EMA(period=self.cfg.trend_ema_period)
@@ -96,11 +98,6 @@ class RSI30Strategy(BaseStrategy):
                 self._emit_exit(side, self._take_profit, "take_profit", is_maker=True)
                 self._close_position("take_profit")
 
-    def _emit_exit(self, side: str, price: float, reason: str, is_maker: bool):
-        self._pending_exit = ExitEvent(
-            side=side, exit_price=price, reason=reason, is_maker=is_maker
-        )
-
     def on_candle(self, candle: Candle) -> Signal:
         """30分足キャンドル確定時にシグナル判定"""
         # 200EMA傾き判定用に更新前の値を保存
@@ -111,6 +108,7 @@ class RSI30Strategy(BaseStrategy):
         self.bb.update(candle.close)
         self.ema.update(candle.close)
         self.atr.update(candle.high, candle.low, candle.close)
+        self.adx.update(candle.high, candle.low, candle.close)
         self.trend_ema.update(candle.close)
 
         if not self.ready():
@@ -119,6 +117,13 @@ class RSI30Strategy(BaseStrategy):
 
         # ポジション持ってたらエントリーしない
         if self._has_position:
+            self._prev_candle = candle
+            return Signal(type=SignalType.NONE)
+
+        # レジームフィルター: トレンド相場（ADX高）では逆張りしない
+        if self.adx.ready and self.adx.value >= self.cfg.adx_threshold:
+            self._signal_armed_buy = False
+            self._signal_armed_sell = False
             self._prev_candle = candle
             return Signal(type=SignalType.NONE)
 
@@ -219,6 +224,7 @@ class RSI30Strategy(BaseStrategy):
 
         return Signal(
             type=SignalType.BUY,
+            is_maker=True,
             price=candle.close,
             size_usd=self.cfg.order_size_usd,
             stop_loss=stop_loss,
@@ -256,6 +262,7 @@ class RSI30Strategy(BaseStrategy):
 
         return Signal(
             type=SignalType.SELL,
+            is_maker=True,
             price=candle.close,
             size_usd=self.cfg.order_size_usd,
             stop_loss=stop_loss,
@@ -290,4 +297,5 @@ class RSI30Strategy(BaseStrategy):
             "ema": self.ema.value if self.ema.ready else None,
             "trend_ema": self.trend_ema.value if self.trend_ema.ready else None,
             "atr": self.atr.value if self.atr.ready else None,
+            "adx": self.adx.value if self.adx.ready else None,
         }

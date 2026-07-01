@@ -79,6 +79,13 @@ def run_backtest(
     filter_idx = 0
     filter_sorted = filter_candles or []
 
+    # 足のtimestampは始値時刻。確定済みの足だけを渡すため、クローズ時刻で比較する
+    def _interval(candles: list[Candle]) -> float:
+        return candles[1].timestamp - candles[0].timestamp if len(candles) >= 2 else 0.0
+
+    entry_int = _interval(entry_candles)
+    filter_int = _interval(filter_sorted)
+
     # オープンポジション管理
     open_entry_ts: float | None = None
     open_entry_price: float = 0.0
@@ -87,8 +94,10 @@ def run_backtest(
     open_is_maker: bool = False
 
     for candle in entry_candles:
-        # 30分足フィルターを先に流す（このキャンドル時刻 ≤ フィルター足ts）
-        while filter_idx < len(filter_sorted) and filter_sorted[filter_idx].timestamp <= candle.timestamp:
+        # 確定済みフィルター足を先に流す（フィルター足クローズ ≤ エントリー足クローズ）
+        while (filter_idx < len(filter_sorted)
+               and filter_sorted[filter_idx].timestamp + filter_int
+               <= candle.timestamp + entry_int):
             fc = filter_sorted[filter_idx]
             if hasattr(strategy, "on_filter_candle"):
                 strategy.on_filter_candle(fc)

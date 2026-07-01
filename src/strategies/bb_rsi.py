@@ -5,10 +5,11 @@
 利確      : リスク幅 × 2.0（RR=2固定。3回中1回勝てばイーブン設計）
 """
 
-from src.strategies.base import BaseStrategy, ExitEvent, Signal, SignalType
+from src.strategies.base import BaseStrategy, Signal, SignalType
 from src.indicators.bollinger import BollingerBands
 from src.indicators.rsi_channel import RSIChannel
 from src.indicators.ema import EMA
+from src.indicators.adx import ADX
 from src.data.candle_builder import Candle
 from src.utils.logger import get_logger
 
@@ -22,6 +23,8 @@ class BBRSIStrategy(BaseStrategy):
         self.bb = BollingerBands(period=20, multiplier=2.0)
         self.rsi = RSIChannel(period=14, ob_level=70.0, os_level=30.0, ema_smooth=1)
         self.trend_ema = EMA(period=200)
+        self.adx = ADX(period=14)
+        self.adx_threshold = 25.0
         self._prev_trend_ema: float = 0.0
 
         self.order_size_usd = 10.0
@@ -43,27 +46,22 @@ class BBRSIStrategy(BaseStrategy):
     def on_trade(self, price: float, size: float, timestamp: float):
         if not self._has_position:
             return
-        # SL/TPともRSI=30/70価格に指値で置く想定 → 両方とも maker fill
+        # TPは指値(maker)、SLは価格貫通後のstop-market(taker)想定
         side = self._position_side
         if side == "buy":
             if price <= self._stop_loss:
-                self._emit_exit(side, self._stop_loss, "stop_loss", is_maker=True)
+                self._emit_exit(side, self._stop_loss, "stop_loss", is_maker=False)
                 self._close()
             elif price >= self._take_profit:
                 self._emit_exit(side, self._take_profit, "take_profit", is_maker=True)
                 self._close()
         elif side == "sell":
             if price >= self._stop_loss:
-                self._emit_exit(side, self._stop_loss, "stop_loss", is_maker=True)
+                self._emit_exit(side, self._stop_loss, "stop_loss", is_maker=False)
                 self._close()
             elif price <= self._take_profit:
                 self._emit_exit(side, self._take_profit, "take_profit", is_maker=True)
                 self._close()
-
-    def _emit_exit(self, side: str, price: float, reason: str, is_maker: bool):
-        self._pending_exit = ExitEvent(
-            side=side, exit_price=price, reason=reason, is_maker=is_maker
-        )
 
     def _close(self):
         self._has_position = False
@@ -79,10 +77,15 @@ class BBRSIStrategy(BaseStrategy):
         self.bb.update(candle.close)
         self.rsi.update(candle.close)
         self.trend_ema.update(candle.close)
+        self.adx.update(candle.high, candle.low, candle.close)
 
         if not self.ready():
             return Signal(type=SignalType.NONE)
         if self._has_position:
+            return Signal(type=SignalType.NONE)
+
+        # レジームフィルター: トレンド相場（ADX高）では逆張りしない
+        if self.adx.ready and self.adx.value >= self.adx_threshold:
             return Signal(type=SignalType.NONE)
 
         trend_up = self._prev_trend_ema > 0 and self.trend_ema.value > self._prev_trend_ema
@@ -102,6 +105,7 @@ class BBRSIStrategy(BaseStrategy):
                 )
                 return Signal(
                     type=SignalType.BUY,
+                    is_maker=True,
                     price=entry,
                     size_usd=self.order_size_usd,
                     stop_loss=sl,
@@ -123,6 +127,7 @@ class BBRSIStrategy(BaseStrategy):
                 )
                 return Signal(
                     type=SignalType.SELL,
+                    is_maker=True,
                     price=entry,
                     size_usd=self.order_size_usd,
                     stop_loss=sl,
@@ -153,4 +158,5 @@ class BBRSIStrategy(BaseStrategy):
             "rsi": self.rsi.rsi_value if self.rsi.ready else None,
             "rsi_ob_price": self.rsi.ob_price if self.rsi.ready else None,
             "rsi_os_price": self.rsi.os_price if self.rsi.ready else None,
+            "adx": self.adx.value if self.adx.ready else None,
         }

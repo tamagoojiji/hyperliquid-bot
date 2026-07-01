@@ -6,6 +6,7 @@ from src.indicators.bollinger import BollingerBands
 from src.indicators.ema import EMA
 from src.indicators.atr import ATR
 from src.indicators.fibonacci import FibonacciRetracement
+from src.indicators.adx import ADX
 from src.data.candle_builder import Candle
 from src.utils.logger import get_logger
 
@@ -27,6 +28,8 @@ class RSI30FiboStrategy(BaseStrategy):
         self.ema = EMA(period=9)
         self.atr = ATR(period=14)
         self.fibo = FibonacciRetracement(swing_lookback=20)
+        self.adx = ADX(period=14)
+        self.adx_threshold = 25.0
         self.filter_ema = EMA(period=9)
         self._prev_filter_ema: float = 0.0
 
@@ -81,6 +84,7 @@ class RSI30FiboStrategy(BaseStrategy):
         self.ema.update(candle.close)
         self.atr.update(candle.high, candle.low, candle.close)
         self.fibo.update(candle.high, candle.low, candle.close)
+        self.adx.update(candle.high, candle.low, candle.close)
 
         today = int(candle.timestamp // 86400)
         if today != self._daily_day:
@@ -92,6 +96,13 @@ class RSI30FiboStrategy(BaseStrategy):
             return Signal(type=SignalType.NONE)
 
         if self._has_position or self._daily_pnl <= -self.max_daily_loss:
+            self._prev_candle = candle
+            return Signal(type=SignalType.NONE)
+
+        # レジームフィルター: トレンド相場（ADX高）では逆張りしない
+        if self.adx.ready and self.adx.value >= self.adx_threshold:
+            self._signal_armed_buy = False
+            self._signal_armed_sell = False
             self._prev_candle = candle
             return Signal(type=SignalType.NONE)
 
@@ -165,7 +176,7 @@ class RSI30FiboStrategy(BaseStrategy):
         self._stop_loss = stop_loss
         self._take_profit = take_profit
 
-        return Signal(type=SignalType.BUY, price=candle.close, size_usd=self.order_size_usd,
+        return Signal(type=SignalType.BUY, is_maker=True, price=candle.close, size_usd=self.order_size_usd,
                       stop_loss=stop_loss, take_profit=take_profit,
                       reason=f"RSI30+Fibo buy: RSI={self.rsi.rsi_value:.1f}")
 
@@ -188,11 +199,15 @@ class RSI30FiboStrategy(BaseStrategy):
         self._stop_loss = stop_loss
         self._take_profit = take_profit
 
-        return Signal(type=SignalType.SELL, price=candle.close, size_usd=self.order_size_usd,
+        return Signal(type=SignalType.SELL, is_maker=True, price=candle.close, size_usd=self.order_size_usd,
                       stop_loss=stop_loss, take_profit=take_profit,
                       reason=f"RSI30+Fibo sell: RSI={self.rsi.rsi_value:.1f}")
 
     def _close_position(self, reason: str, price: float):
+        self._emit_exit(
+            self._position_side, price, reason,
+            is_maker=reason.startswith("take_profit"),
+        )
         pnl = 0.0
         if self._position_side == "buy":
             pnl = (price - self._entry_price) / self._entry_price * self.order_size_usd

@@ -140,6 +140,10 @@ class MACDVWAPStrategy(BaseStrategy):
         )
 
     def _close_position(self, reason: str, price: float):
+        self._emit_exit(
+            self._position_side, price, reason,
+            is_maker=reason.startswith("take_profit"),
+        )
         pnl = 0.0
         if self._position_side == "buy":
             pnl = (price - self._entry_price) / self._entry_price * self.order_size_usd

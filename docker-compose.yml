@@ -123,6 +123,28 @@ services:
     container_name: bot-sol-sessionbo
     command: python -m src.main --strategy session_bo --symbol SOL --mode dry
 
+  # ドンチャンブレイク + ATRトレーリング（日足スイング）
+  bot-btc-donchian:
+    <<: *bot-common
+    container_name: bot-btc-donchian
+    command: python -m src.main --strategy donchian --symbol BTC --mode dry
+
+  bot-sol-donchian:
+    <<: *bot-common
+    container_name: bot-sol-donchian
+    command: python -m src.main --strategy donchian --symbol SOL --mode dry
+
+  # ボリバン + RSIチャネル
+  bot-btc-bbrsi:
+    <<: *bot-common
+    container_name: bot-btc-bbrsi
+    command: python -m src.main --strategy bb_rsi --symbol BTC --mode dry
+
+  bot-sol-bbrsi:
+    <<: *bot-common
+    container_name: bot-sol-bbrsi
+    command: python -m src.main --strategy bb_rsi --symbol SOL --mode dry
+
 volumes:
   bot-data:
 

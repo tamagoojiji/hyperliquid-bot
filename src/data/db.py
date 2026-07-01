@@ -17,6 +17,8 @@ class Database:
         self._db = await aiosqlite.connect(str(DB_PATH))
         await self._db.execute("PRAGMA journal_mode=WAL")
         await self._db.execute("PRAGMA synchronous=NORMAL")
+        # 複数コンテナが同一DBに書き込むため、ロック競合時は待機させる
+        await self._db.execute("PRAGMA busy_timeout=5000")
         await self._create_tables()
 
     async def _create_tables(self):
@@ -72,6 +74,15 @@ class Database:
                 ws_connected INTEGER NOT NULL,
                 last_quote_age_ms INTEGER NOT NULL,
                 error_count INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE TABLE IF NOT EXISTS funding_oi (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                symbol TEXT NOT NULL,
+                funding_rate_1h REAL,
+                open_interest REAL,
+                mark_price REAL
             );
 
             CREATE TABLE IF NOT EXISTS shadow_fills (
@@ -213,6 +224,22 @@ class Database:
         await self._db.commit()
         return cursor.lastrowid
 
+    async def insert_funding_oi(
+        self,
+        symbol: str,
+        funding_rate_1h: float | None,
+        open_interest: float | None,
+        mark_price: float | None,
+    ) -> int:
+        ts = self._now()
+        cursor = await self._db.execute(
+            "INSERT INTO funding_oi (timestamp, symbol, funding_rate_1h, open_interest, mark_price) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (ts, symbol, funding_rate_1h, open_interest, mark_price),
+        )
+        await self._db.commit()
+        return cursor.lastrowid
+
     async def get_daily_summary(self, strategy: str) -> dict:
         today_start = datetime.now(timezone.utc).replace(
             hour=0, minute=0, second=0, microsecond=0
@@ -291,21 +318,22 @@ class Database:
                 "total_funding": 0.0, "net_pnl": 0.0, "total_volume": 0.0, "max_drawdown": 0.0,
             }
 
+        # exit行の estimated_pnl は手数料・funding控除済みのnet値（compute_net_pnl）
         exit_rows = [r for r in rows if "exit" in (r[6] or "")]
         trade_count = len(exit_rows)
-        total_pnl = sum(r[3] for r in exit_rows)
-        win_count = sum(1 for r in exit_rows if (r[3] - 0) > 0)
-        loss_count = sum(1 for r in exit_rows if (r[3] - 0) < 0)
+        net_pnl = sum(r[3] for r in exit_rows)
+        win_count = sum(1 for r in exit_rows if r[3] > 0)
+        loss_count = sum(1 for r in exit_rows if r[3] < 0)
         total_fees = sum(r[4] for r in rows)
         total_funding = sum(r[5] for r in rows)
         total_volume = sum(r[1] * r[0] for r in rows)
-        net_pnl = total_pnl - total_fees - total_funding
+        total_pnl = net_pnl + total_fees + total_funding  # グロス損益
 
         cumulative = 0.0
         peak = 0.0
         max_dd = 0.0
         for r in exit_rows:
-            cumulative += r[3] - r[4] - r[5]
+            cumulative += r[3]
             peak = max(peak, cumulative)
             max_dd = max(max_dd, peak - cumulative)
 

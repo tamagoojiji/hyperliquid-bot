@@ -179,7 +179,22 @@ class SessionBreakoutStrategy(BaseStrategy):
             f"ratio={closed_ratio} price={price:.2f} SL moved to entry={self._entry_price:.2f}"
         )
 
+    def _weighted_exit_price(self, price: float) -> float:
+        """TP1で半分利確済みの場合、TP1価格と最終価格の加重平均を返す。
+
+        実行系は部分決済を表現できないため、全量を1回のexitとして
+        記録しても損益が一致するように換算する。
+        """
+        if not self._tp1_hit:
+            return price
+        r = self.cfg.tp1_close_ratio
+        return self._take_profit_1 * r + price * (1.0 - r)
+
     def _close_position(self, reason: str, price: float):
+        self._emit_exit(
+            self._position_side, self._weighted_exit_price(price), reason,
+            is_maker=reason.startswith("take_profit"),
+        )
         log.info(
             f"Position closed: {self._position_side} {reason} "
             f"entry={self._entry_price:.2f} exit={price:.2f}"
@@ -187,6 +202,10 @@ class SessionBreakoutStrategy(BaseStrategy):
         self._reset_position()
 
     def _force_close(self, price: float):
+        self._emit_exit(
+            self._position_side, self._weighted_exit_price(price),
+            "force_close", is_maker=False,
+        )
         log.info(
             f"Force close (day change): {self._position_side} "
             f"entry={self._entry_price:.2f} exit={price:.2f}"

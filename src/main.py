@@ -20,7 +20,10 @@ from src.strategies.rsi30_fibo import RSI30FiboStrategy
 from src.strategies.pivot_bb import PivotBBStrategy
 from src.strategies.pivot_vwap import PivotVWAPStrategy
 from src.strategies.session_bo import SessionBreakoutStrategy
+from src.strategies.bb_rsi import BBRSIStrategy
+from src.strategies.donchian import DonchianStrategy
 from src.data.candle_builder import CandleBuilder, Candle
+from src.indicators.ema import EMA
 from src.data.db import Database
 from src.notify.discord import DiscordNotifier
 from src.risk.position import PositionTracker
@@ -68,6 +71,10 @@ class Bot:
         # キャンドルビルダー
         self.candle_5m = CandleBuilder(interval_seconds=300)
         self.candle_30m = CandleBuilder(interval_seconds=1800)
+        self.candle_1d = CandleBuilder(interval_seconds=86400)
+
+        # 日足200EMA — 全directional戦略の方向フィルター（上=ロングのみ/下=ショートのみ）
+        self.trend_ema_1d = EMA(period=200)
 
         # ドライラン用: 仮想ポジション + funding rate キャッシュ
         self._virtual_positions: dict[str, VirtualPosition] = {}
@@ -99,10 +106,14 @@ class Bot:
             return PivotVWAPStrategy(self.cfg.symbol, self.cfg.mode, self.cfg.rsi30)
         elif self.cfg.strategy == "session_bo":
             return SessionBreakoutStrategy(self.cfg.symbol, self.cfg.mode, self.cfg.session_bo)
+        elif self.cfg.strategy == "bb_rsi":
+            return BBRSIStrategy(self.cfg.symbol, self.cfg.mode)
+        elif self.cfg.strategy == "donchian":
+            return DonchianStrategy(self.cfg.symbol, self.cfg.mode, self.cfg.donchian)
         raise ValueError(f"Unknown strategy: {self.cfg.strategy}")
 
     def _get_risk_config(self) -> dict:
-        if self.cfg.strategy in ("rsi30", "pivot_bounce", "breakout", "macd_vwap", "rsi30_fibo", "pivot_bb", "pivot_vwap"):
+        if self.cfg.strategy in ("rsi30", "pivot_bounce", "breakout", "macd_vwap", "rsi30_fibo", "pivot_bb", "pivot_vwap", "bb_rsi"):
             return {
                 "max_loss": self.cfg.rsi30.max_loss_usd,
                 "max_position": self.cfg.rsi30.max_position_usd,
@@ -116,6 +127,11 @@ class Bot:
             return {
                 "max_loss": self.cfg.session_bo.max_loss_usd,
                 "max_position": self.cfg.session_bo.max_position_usd,
+            }
+        elif self.cfg.strategy == "donchian":
+            return {
+                "max_loss": self.cfg.donchian.max_loss_usd,
+                "max_position": self.cfg.donchian.max_position_usd,
             }
         return {"max_loss": 20.0, "max_position": 30.0}
 
@@ -181,8 +197,9 @@ class Bot:
         """過去キャンドルデータでインジケーターをウォームアップ"""
         log.info("Loading historical candles...")
 
-        # 5分足
-        candles_5m = self.hl.get_candles(self.cfg.symbol, "5m", limit=200)
+        # 5分足 — bb_rsiは5分足200EMA用に多めに取得
+        candles_5m_limit = 300 if self.cfg.strategy == "bb_rsi" else 200
+        candles_5m = self.hl.get_candles(self.cfg.symbol, "5m", limit=candles_5m_limit)
         for c in candles_5m:
             candle = Candle(
                 timestamp=c["t"] / 1000,
@@ -193,7 +210,7 @@ class Bot:
                 volume=float(c.get("v", 0)),
             )
             self.candle_5m.load_single(candle)
-            if self.cfg.strategy in ("pivot_bounce", "breakout", "macd_vwap", "rsi30_fibo", "pivot_bb", "pivot_vwap", "session_bo"):
+            if self.cfg.strategy in ("pivot_bounce", "breakout", "macd_vwap", "rsi30_fibo", "pivot_bb", "pivot_vwap", "session_bo", "bb_rsi"):
                 self.strategy.on_candle(candle)
 
         # 30分足 — rsi30は200EMA用に多めに取得
@@ -214,6 +231,33 @@ class Bot:
             elif self.cfg.strategy in ("pivot_bounce", "breakout", "macd_vwap", "rsi30_fibo", "pivot_bb", "pivot_vwap"):
                 self.strategy.on_filter_candle(candle)
 
+        # 日足 — donchianのチャネル/ATR + 全directional戦略の200EMA方向フィルター用
+        if self.cfg.strategy not in ("simple_mm", "full_mm"):
+            candles_1d = self.hl.get_candles(self.cfg.symbol, "1d", limit=250)
+            for c in candles_1d:
+                candle = Candle(
+                    timestamp=c["t"] / 1000,
+                    open=float(c["o"]),
+                    high=float(c["h"]),
+                    low=float(c["l"]),
+                    close=float(c["c"]),
+                    volume=float(c.get("v", 0)),
+                )
+                self.candle_1d.load_single(candle)
+                self.trend_ema_1d.update(candle.close)
+                if self.cfg.strategy == "donchian":
+                    self.strategy.on_candle(candle)
+            log.info(
+                f"Loaded {len(candles_1d)} 1d candles "
+                f"(EMA200 ready: {self.trend_ema_1d.ready})"
+            )
+
+        # ウォームアップ中に立ったシグナルは注文/仮想ポジションを伴わないため、
+        # 内部のポジション状態を破棄する（残すと以後のエントリーが恒久ブロックされる）
+        if getattr(self.strategy, "_has_position", False):
+            log.warning("Discarding phantom position state from warmup")
+        self.strategy.reset_position_state()
+
         log.info(
             f"Loaded {len(candles_5m)} 5m candles, {len(candles_30m)} 30m candles. "
             f"Strategy ready: {self.strategy.ready()}"
@@ -229,6 +273,13 @@ class Bot:
             # キャンドルビルダーに投入
             completed_5m = self.candle_5m.update(price, size, ts)
             completed_30m = self.candle_30m.update(price, size, ts)
+            completed_1d = self.candle_1d.update(price, size, ts)
+
+            # 日足確定 → 200EMA更新 + donchianのシグナル判定
+            if completed_1d:
+                self.trend_ema_1d.update(completed_1d.close)
+                if self.cfg.strategy == "donchian":
+                    await self._process_candle(completed_1d)
 
             # 30分足確定
             if completed_30m:
@@ -239,8 +290,8 @@ class Bot:
                     # 他戦略は30分足をフィルターとして使用
                     self.strategy.on_filter_candle(completed_30m)
 
-            # 5分足確定 → シグナル判定（rsi30以外。session_boも5分足）
-            if completed_5m and self.cfg.strategy != "rsi30":
+            # 5分足確定 → シグナル判定（rsi30=30分足 / donchian=日足 以外）
+            if completed_5m and self.cfg.strategy not in ("rsi30", "donchian"):
                 await self._process_candle(completed_5m)
 
             # session_bo は30分足フィルター不要（5分足で直接レンジ構築）
@@ -267,11 +318,30 @@ class Bot:
         if signal.type == SignalType.NONE:
             return
 
+        # 日足200EMA方向フィルター: 上ではロングのみ、下ではショートのみ許可
+        if (self.cfg.trend_filter_enabled
+                and self.cfg.strategy not in ("simple_mm", "full_mm")
+                and self.trend_ema_1d.ready):
+            ema200 = self.trend_ema_1d.value
+            blocked = (
+                (signal.type == SignalType.BUY and candle.close < ema200)
+                or (signal.type == SignalType.SELL and candle.close > ema200)
+            )
+            if blocked:
+                log.info(
+                    f"Trend filter blocked {signal.type.value}: "
+                    f"close={candle.close:.2f} ema200_1d={ema200:.2f}"
+                )
+                # シグナル生成時に立てた戦略内部のポジション状態を破棄
+                self.strategy.reset_position_state()
+                return
+
         # リスクチェック
         pos = self.position_tracker.get(self.cfg.symbol)
         pos_usd = abs(pos.size * candle.close)
         if not self.risk.can_open(self.cfg.symbol, signal.size_usd, pos_usd):
             log.warning("Risk limit reached, skipping signal")
+            self.strategy.reset_position_state()
             return
 
         if self.risk.should_stop():
@@ -279,6 +349,7 @@ class Bot:
             await self.discord.notify_stop_loss(
                 abs(self.risk.net_pnl), self.risk.net_pnl
             )
+            self.strategy.reset_position_state()
             return
 
         # 注文実行 or ドライラン記録
@@ -304,16 +375,21 @@ class Bot:
                     order_type="limit",
                     status="placed",
                 )
+            else:
+                log.warning("Order placement failed, resetting strategy state")
+                self.strategy.reset_position_state()
+                return
         else:
             # ドライラン: 仮想ポジション作成 + 手数料記録
-            is_maker = True  # RSI30は post-only limit を使用
+            # maker/takerは戦略のSignalが宣言する（逆張り=指値maker、ブレイク=成行taker）
+            is_maker = signal.is_maker
             entry_fee = compute_fee(
                 signal.size_usd, is_maker,
                 self.cfg.fees.maker_bps, self.cfg.fees.taker_bps,
             )
             size_base = signal.size_usd / signal.price
-            # 仮想ポジション追跡は exit イベント発行に対応した戦略のみ
-            if self.cfg.strategy == "rsi30":
+            # directional戦略は全て仮想ポジションで決済まで追跡する（MM系はmm_sim経路）
+            if self.cfg.strategy not in ("simple_mm", "full_mm"):
                 self._virtual_positions[self.cfg.symbol] = VirtualPosition(
                     strategy=self.strategy.name,
                     symbol=self.cfg.symbol,
@@ -559,11 +635,28 @@ class Bot:
         )
 
     async def _funding_loop(self):
-        """1時間ごとに funding rate を取得し、open中の仮想ポジションに適用"""
+        """1時間ごとに funding rate を取得し、open中の仮想ポジションに適用
+
+        funding/OIの時系列記録（funding_oiテーブル）はコンテナ間の重複を避けるため
+        シンボルごとに代表1コンテナ（rsi30）だけが行う。
+        """
         interval = self.cfg.fees.funding_fetch_interval_sec
         while self._running:
             await asyncio.sleep(interval)
-            rate = self.hl.get_current_funding_rate(self.cfg.symbol)
+            ctx = self.hl.get_asset_ctx(self.cfg.symbol)
+            if ctx is None:
+                continue
+            rate = ctx["funding"]
+            if self.cfg.strategy == "rsi30":
+                try:
+                    await self.db.insert_funding_oi(
+                        symbol=self.cfg.symbol,
+                        funding_rate_1h=rate,
+                        open_interest=ctx["open_interest"],
+                        mark_price=ctx["mark_price"],
+                    )
+                except Exception as e:
+                    log.error(f"Failed to record funding/OI: {e}")
             if rate is None:
                 continue
             self._current_funding_rate_1h = rate
@@ -661,7 +754,7 @@ class Bot:
 def parse_args():
     parser = argparse.ArgumentParser(description="Hyperliquid Trading Bot")
     parser.add_argument(
-        "--strategy", choices=["rsi30", "simple_mm", "full_mm", "pivot_bounce", "breakout", "macd_vwap", "rsi30_fibo", "pivot_bb", "pivot_vwap", "session_bo"],
+        "--strategy", choices=["rsi30", "simple_mm", "full_mm", "pivot_bounce", "breakout", "macd_vwap", "rsi30_fibo", "pivot_bb", "pivot_vwap", "session_bo", "bb_rsi", "donchian"],
         default="rsi30", help="Trading strategy"
     )
     parser.add_argument(

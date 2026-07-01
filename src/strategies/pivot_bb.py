@@ -5,6 +5,7 @@ from src.indicators.pivot import PivotPoints
 from src.indicators.bollinger import BollingerBands
 from src.indicators.ema import EMA
 from src.indicators.atr import ATR
+from src.indicators.adx import ADX
 from src.data.candle_builder import Candle
 from src.utils.logger import get_logger
 
@@ -26,6 +27,8 @@ class PivotBBStrategy(BaseStrategy):
         self.ema = EMA(period=9)
         self.atr = ATR(period=14)
         self.filter_ema = EMA(period=9)
+        self.adx = ADX(period=14)
+        self.adx_threshold = 25.0
         self._prev_filter_ema: float = 0.0
 
         self._prev_candle: Candle | None = None
@@ -72,6 +75,7 @@ class PivotBBStrategy(BaseStrategy):
         self.ema.update(candle.close)
         self.atr.update(candle.high, candle.low, candle.close)
         self.pivot.update(candle.high, candle.low, candle.close, candle.timestamp)
+        self.adx.update(candle.high, candle.low, candle.close)
 
         today = int(candle.timestamp // 86400)
         if today != self._daily_day:
@@ -83,6 +87,11 @@ class PivotBBStrategy(BaseStrategy):
             return Signal(type=SignalType.NONE)
 
         if self._has_position or self._daily_pnl <= -self.max_daily_loss:
+            self._prev_candle = candle
+            return Signal(type=SignalType.NONE)
+
+        # レジームフィルター: トレンド相場（ADX高）では逆張りしない
+        if self.adx.ready and self.adx.value >= self.adx_threshold:
             self._prev_candle = candle
             return Signal(type=SignalType.NONE)
 
@@ -150,12 +159,17 @@ class PivotBBStrategy(BaseStrategy):
 
         return Signal(
             type=SignalType.BUY if side == "buy" else SignalType.SELL,
+            is_maker=True,
             price=candle.close, size_usd=self.order_size_usd,
             stop_loss=stop_loss, take_profit=take_profit,
             reason=f"Pivot+BB {side}: S1/R1+BB overlap",
         )
 
     def _close_position(self, reason: str, price: float):
+        self._emit_exit(
+            self._position_side, price, reason,
+            is_maker=reason.startswith("take_profit"),
+        )
         pnl = 0.0
         if self._position_side == "buy":
             pnl = (price - self._entry_price) / self._entry_price * self.order_size_usd

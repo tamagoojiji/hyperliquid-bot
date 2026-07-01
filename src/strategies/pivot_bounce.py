@@ -2,6 +2,7 @@ from src.strategies.base import BaseStrategy, Signal, SignalType
 from src.indicators.pivot import PivotPoints
 from src.indicators.ema import EMA
 from src.indicators.rsi_channel import RSIChannel
+from src.indicators.adx import ADX
 from src.data.candle_builder import Candle
 from src.config import RSI30Config
 from src.utils.logger import get_logger
@@ -19,6 +20,8 @@ class PivotBounceStrategy(BaseStrategy):
         self.rsi = RSIChannel(period=14, ob_level=70, os_level=30)
         self.ema = EMA(period=9)  # エントリー足のEMA
         self.filter_ema = EMA(period=9)  # 30分足フィルター
+        self.adx = ADX(period=14)
+        self.adx_threshold = 25.0
         self._prev_filter_ema: float = 0.0
 
         # 状態
@@ -80,12 +83,20 @@ class PivotBounceStrategy(BaseStrategy):
         self.rsi.update(candle.close)
         self.ema.update(candle.close)
         self.pivot.update(candle.high, candle.low, candle.close, candle.timestamp)
+        self.adx.update(candle.high, candle.low, candle.close)
 
         if not self.ready():
             self._prev_candle = candle
             return Signal(type=SignalType.NONE)
 
         if self._has_position:
+            self._prev_candle = candle
+            return Signal(type=SignalType.NONE)
+
+        # レジームフィルター: トレンド相場（ADX高）では逆張りしない
+        if self.adx.ready and self.adx.value >= self.adx_threshold:
+            self._signal_armed_buy = False
+            self._signal_armed_sell = False
             self._prev_candle = candle
             return Signal(type=SignalType.NONE)
 
@@ -191,6 +202,7 @@ class PivotBounceStrategy(BaseStrategy):
 
         return Signal(
             type=SignalType.BUY,
+            is_maker=True,
             price=candle.close,
             size_usd=self.order_size_usd,
             stop_loss=stop_loss,
@@ -217,6 +229,7 @@ class PivotBounceStrategy(BaseStrategy):
 
         return Signal(
             type=SignalType.SELL,
+            is_maker=True,
             price=candle.close,
             size_usd=self.order_size_usd,
             stop_loss=stop_loss,
@@ -225,6 +238,10 @@ class PivotBounceStrategy(BaseStrategy):
         )
 
     def _close_position(self, reason: str, price: float):
+        self._emit_exit(
+            self._position_side, price, reason,
+            is_maker=reason.startswith("take_profit"),
+        )
         pnl = 0.0
         if self._position_side == "buy":
             pnl = (price - self._entry_price) / self._entry_price * self.order_size_usd

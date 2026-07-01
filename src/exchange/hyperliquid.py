@@ -118,11 +118,11 @@ class HyperliquidClient:
             log.error(f"Failed to get balance: {e}")
             return 0.0
 
-    def get_current_funding_rate(self, symbol: str) -> float | None:
-        """現在の funding rate を取得（1時間単位の係数、例 0.00001 = 0.001%/h）
+    def get_asset_ctx(self, symbol: str) -> dict | None:
+        """assetCtx（funding / openInterest / markPx 等）を取得
 
         Hyperliquid の meta_and_asset_ctxs は universe と並列に assetCtx を返す。
-        assetCtx には `funding` フィールド（文字列、1h レート）が含まれる。
+        funding は1時間単位の係数（例 0.00001 = 0.001%/h）。
         """
         try:
             meta_ctx = self._info.meta_and_asset_ctxs()
@@ -132,14 +132,20 @@ class HyperliquidClient:
             ctxs = meta_ctx[1]
             for asset, ctx in zip(universe, ctxs):
                 if asset.get("name") == symbol:
-                    funding_str = ctx.get("funding")
-                    if funding_str is None:
-                        return None
-                    return float(funding_str)
+                    return {
+                        "funding": float(ctx["funding"]) if ctx.get("funding") is not None else None,
+                        "open_interest": float(ctx["openInterest"]) if ctx.get("openInterest") is not None else None,
+                        "mark_price": float(ctx["markPx"]) if ctx.get("markPx") is not None else None,
+                    }
             return None
         except Exception as e:
-            log.error(f"Failed to get funding rate for {symbol}: {e}")
+            log.error(f"Failed to get asset ctx for {symbol}: {e}")
             return None
+
+    def get_current_funding_rate(self, symbol: str) -> float | None:
+        """現在の funding rate を取得（1時間単位の係数）"""
+        ctx = self.get_asset_ctx(symbol)
+        return ctx["funding"] if ctx else None
 
     def get_candles(self, symbol: str, interval: str, limit: int = 500) -> list[dict]:
         """ヒストリカルキャンドルデータ取得"""

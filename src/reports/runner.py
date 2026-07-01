@@ -70,27 +70,38 @@ async def _post(png_paths: list, embed: dict) -> None:
         print('No webhook configured')
         return
     # Discord webhookは1リクエスト最大10ファイル。3枚なので1回でOK。
-    form = aiohttp.FormData()
-    attachments = [{'id': i, 'filename': Path(p).name} for i, p in enumerate(png_paths)]
-    form.add_field('payload_json',
-                   json.dumps({'embeds': [embed], 'attachments': attachments}),
-                   content_type='application/json')
-    for i, p in enumerate(png_paths):
-        path = Path(p)
-        form.add_field(f'files[{i}]', path.read_bytes(),
-                       filename=path.name, content_type='image/png')
+    # FormDataはPOST後に再利用できないため、リトライごとに作り直す
+    def _build_form() -> aiohttp.FormData:
+        form = aiohttp.FormData()
+        attachments = [{'id': i, 'filename': Path(p).name}
+                       for i, p in enumerate(png_paths)]
+        form.add_field('payload_json',
+                       json.dumps({'embeds': [embed], 'attachments': attachments}),
+                       content_type='application/json')
+        for i, p in enumerate(png_paths):
+            path = Path(p)
+            form.add_field(f'files[{i}]', path.read_bytes(),
+                           filename=path.name, content_type='image/png')
+        return form
+
     async with aiohttp.ClientSession() as session:
         for attempt in range(3):
-            async with session.post(WEBHOOK_URL, data=form) as resp:
-                if resp.status in (200, 204):
-                    print(f'Posted report: status={resp.status} files={len(png_paths)}')
+            try:
+                async with session.post(WEBHOOK_URL, data=_build_form()) as resp:
+                    if resp.status in (200, 204):
+                        print(f'Posted report: status={resp.status} files={len(png_paths)}')
+                        return
+                    if resp.status == 429 or resp.status >= 500:
+                        retry_after = float(resp.headers.get('Retry-After', 2 * (attempt + 1)))
+                        await asyncio.sleep(retry_after)
+                        continue
+                    body = await resp.text()
+                    print(f'Discord POST failed: {resp.status} {body[:200]}')
                     return
-                if resp.status == 429:
-                    await asyncio.sleep(2 * (attempt + 1))
-                    continue
-                body = await resp.text()
-                print(f'Discord POST failed: {resp.status} {body[:200]}')
-                return
+            except aiohttp.ClientError as e:
+                print(f'Discord POST error (attempt {attempt + 1}): {e}')
+                await asyncio.sleep(2 * (attempt + 1))
+        print('Discord POST failed after 3 attempts')
 
 
 async def _run_once(fire_time: datetime) -> None:

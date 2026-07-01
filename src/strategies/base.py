@@ -19,8 +19,8 @@ class Signal:
     stop_loss: float = 0.0
     take_profit: float = 0.0
     reason: str = ""
-    # 現状は backtest engine の手数料計算のみで参照される。runtime（src/main.py）の
-    # ドライラン執行経路は is_maker=True 相当を固定で使うため runtime 動作には影響しない。
+    # エントリーの想定fill種別。backtest engine と runtime ドライランの両方が参照する。
+    # 逆張り系（指値エントリー）は True、ブレイク系（成行エントリー）は False を宣言する。
     is_maker: bool = False
 
 
@@ -46,6 +46,21 @@ class BaseStrategy(ABC):
         evt = self._pending_exit
         self._pending_exit = None
         return evt
+
+    def _emit_exit(self, side: str, price: float, reason: str, is_maker: bool):
+        self._pending_exit = ExitEvent(
+            side=side, exit_price=price, reason=reason, is_maker=is_maker
+        )
+
+    def reset_position_state(self):
+        """ウォームアップ中に立った幻シグナルのポジション状態を破棄する。
+
+        実注文・仮想ポジションを伴わない内部状態だけが残ると
+        以後のエントリーが恒久ブロックされるため、履歴ロード後に呼ぶ。
+        """
+        self._has_position = False
+        self._position_side = ""
+        self._pending_exit = None
 
     @property
     @abstractmethod

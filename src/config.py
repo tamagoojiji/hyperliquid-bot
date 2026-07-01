@@ -68,6 +68,10 @@ class RSI30Config:
     atr_sl_multiplier: float = 1.5    # 損切り = ATR × 1.5
     rr_ratio: float = 2.0             # リスクリワード比
 
+    # レジームフィルター（逆張り系はレンジ相場のみエントリー）
+    adx_period: int = 14
+    adx_threshold: float = 25.0       # ADXがこの値以上 = トレンド相場と判定
+
     # リスク管理
     order_size_usd: float = 10.0
     max_position_usd: float = 30.0
@@ -116,6 +120,18 @@ class SessionBOConfig:
     tp1_close_ratio: float = 0.5      # 利確1で半分決済
 
 
+@dataclass
+class DonchianConfig:
+    """ドンチャンブレイク + ATRトレーリング（日足スイング）パラメータ"""
+    channel_period: int = 20          # ドンチャンチャネル期間（日）
+    atr_period: int = 14
+    atr_trail_multiplier: float = 3.0  # トレーリングストップ = ATR × 3
+
+    order_size_usd: float = 10.0
+    max_position_usd: float = 30.0
+    max_loss_usd: float = 20.0
+
+
 # ペア別MMパラメータオーバーライド
 MM_OVERRIDES: dict[str, dict] = {
     "SOL": {
@@ -138,7 +154,10 @@ class BotConfig:
     rsi30: RSI30Config = field(default_factory=RSI30Config)
     simple_mm: SimpleMMConfig = field(default_factory=SimpleMMConfig)
     session_bo: SessionBOConfig = field(default_factory=SessionBOConfig)
+    donchian: DonchianConfig = field(default_factory=DonchianConfig)
     fees: FeeConfig = field(default_factory=FeeConfig.from_env)
+    # 日足200EMA方向フィルター（上=ロングのみ/下=ショートのみ。TREND_FILTER_ENABLED=0で無効化）
+    trend_filter_enabled: bool = True
 
     @classmethod
     def from_env(cls, strategy: str = "rsi30", symbol: str = "BTC",
@@ -150,6 +169,7 @@ class BotConfig:
             hl=HLConfig.from_env(),
             discord_webhook_url=os.getenv("DISCORD_WEBHOOK_URL", ""),
             fees=FeeConfig.from_env(),
+            trend_filter_enabled=os.getenv("TREND_FILTER_ENABLED", "1") != "0",
         )
         # ペア別オーバーライド
         if symbol in MM_OVERRIDES and strategy == "simple_mm":

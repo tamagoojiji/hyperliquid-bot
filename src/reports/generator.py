@@ -25,30 +25,15 @@ JST = timezone(timedelta(hours=9))
 DB_PATH = os.environ.get('BOT_DB_PATH', '/app/data/bot.db')
 INITIAL_BALANCE = 100.0
 
-SYMBOLS = ['BTC', 'SOL', 'ETH', 'XRP', 'BNB', 'AVAX']
-STRATEGIES = ['full_mm', 'simple_mm', 'macd_vwap']
-STRATEGY_JP = {
-    'full_mm': 'full_mm（多段MM）',
-    'simple_mm': 'simple_mm（単段MM）',
-    'macd_vwap': 'macd_vwap（トレンド）',
-}
-STRATEGY_COND = {
-    'full_mm': {
-        'tf': 'Tick / 継続quote',
-        'cond': 'BBOに追従した多段指値quote（L0/L1/L2）。Fill toxicity/orderflow解析と在庫スキュー制御を併用。',
-        'thresholds': 'spread_bps銘柄別, max_skew=4.0bps, ボラ補正0.6-3.0x',
-    },
-    'simple_mm': {
-        'tf': 'Tick / 継続quote',
-        'cond': '単段の指値quote。固定スプレッドと標準スキュー。',
-        'thresholds': 'spread_bps銘柄別, 単一レベル, ボラ補正0.6-3.0x',
-    },
-    'macd_vwap': {
-        'tf': '5分足 (フィルター: 30分EMA)',
-        'cond': 'MACDゴールデン/デッドクロス + 価格とVWAPの位置関係 + 30分EMA方向フィルター。',
-        'thresholds': 'MACD(12,26,9), 最大保有 8〜16本(銘柄別)で強制クローズ',
-    },
-}
+# docker-compose.yml の稼働構成と同期させること（稼働率の分母・0件診断の対象に使用）
+SYMBOLS = ['BTC', 'SOL']
+STRATEGIES = [
+    'rsi30', 'pivot_bounce', 'breakout', 'macd_vwap', 'rsi30_fibo',
+    'pivot_bb', 'pivot_vwap', 'session_bo', 'bb_rsi', 'donchian',
+]
+# エントリー/決済のfill_model判定（directional='entry'/'exit_*'、MM系='mm_sim'/'mm_sim_exit'）
+SQL_IS_ENTRY = "(fill_model IN ('mm_sim','touch','entry'))"
+SQL_IS_EXIT = "(fill_model='mm_sim_exit' OR fill_model LIKE 'exit%')"
 BINANCE_MAP = {
     'BTC': 'BTCUSDT', 'SOL': 'SOLUSDT', 'ETH': 'ETHUSDT',
     'XRP': 'XRPUSDT', 'BNB': 'BNBUSDT', 'AVAX': 'AVAXUSDT',
@@ -69,13 +54,13 @@ def _q(conn, sql, params=()):
 
 
 def _query_stats(conn, start_iso, end_iso):
-    rows = _q(conn, """
+    rows = _q(conn, f"""
         SELECT strategy, symbol,
                COUNT(*),
-               SUM(CASE WHEN estimated_pnl!=0 THEN 1 ELSE 0 END),
-               SUM(CASE WHEN estimated_pnl>0 THEN 1 ELSE 0 END),
-               SUM(CASE WHEN estimated_pnl<0 THEN 1 ELSE 0 END),
-               ROUND(SUM(estimated_pnl),4)
+               SUM(CASE WHEN {SQL_IS_EXIT} THEN 1 ELSE 0 END),
+               SUM(CASE WHEN {SQL_IS_EXIT} AND estimated_pnl>0 THEN 1 ELSE 0 END),
+               SUM(CASE WHEN {SQL_IS_EXIT} AND estimated_pnl<0 THEN 1 ELSE 0 END),
+               ROUND(SUM(CASE WHEN {SQL_IS_EXIT} THEN estimated_pnl ELSE 0 END),4)
         FROM shadow_fills
         WHERE timestamp >= ? AND timestamp < ?
         GROUP BY strategy, symbol
@@ -101,19 +86,19 @@ def _query_stats(conn, start_iso, end_iso):
 def _query_ls_by_symbol(conn, start_iso, end_iso):
     """(strategy, symbol) ごとに Long / Short の内訳を返す。PNG1カード用。
 
-    Long:  エントリー= mm_sim/touch × buy, 決済= mm_sim_exit × sell
-    Short: エントリー= mm_sim/touch × sell, 決済= mm_sim_exit × buy
+    Long:  エントリー= entry系 × buy, 決済= exit系 × sell
+    Short: エントリー= entry系 × sell, 決済= exit系 × buy
     """
-    rows = _q(conn, """
+    rows = _q(conn, f"""
         SELECT strategy, symbol,
-               SUM(CASE WHEN fill_model IN ('mm_sim','touch') AND side='buy'  THEN 1 ELSE 0 END),
-               SUM(CASE WHEN fill_model='mm_sim_exit' AND side='sell' THEN 1 ELSE 0 END),
-               SUM(CASE WHEN fill_model='mm_sim_exit' AND side='sell' AND estimated_pnl>0 THEN 1 ELSE 0 END),
-               ROUND(SUM(CASE WHEN fill_model='mm_sim_exit' AND side='sell' THEN estimated_pnl ELSE 0 END), 4),
-               SUM(CASE WHEN fill_model IN ('mm_sim','touch') AND side='sell' THEN 1 ELSE 0 END),
-               SUM(CASE WHEN fill_model='mm_sim_exit' AND side='buy'  THEN 1 ELSE 0 END),
-               SUM(CASE WHEN fill_model='mm_sim_exit' AND side='buy'  AND estimated_pnl>0 THEN 1 ELSE 0 END),
-               ROUND(SUM(CASE WHEN fill_model='mm_sim_exit' AND side='buy'  THEN estimated_pnl ELSE 0 END), 4)
+               SUM(CASE WHEN {SQL_IS_ENTRY} AND side='buy'  THEN 1 ELSE 0 END),
+               SUM(CASE WHEN {SQL_IS_EXIT} AND side='sell' THEN 1 ELSE 0 END),
+               SUM(CASE WHEN {SQL_IS_EXIT} AND side='sell' AND estimated_pnl>0 THEN 1 ELSE 0 END),
+               ROUND(SUM(CASE WHEN {SQL_IS_EXIT} AND side='sell' THEN estimated_pnl ELSE 0 END), 4),
+               SUM(CASE WHEN {SQL_IS_ENTRY} AND side='sell' THEN 1 ELSE 0 END),
+               SUM(CASE WHEN {SQL_IS_EXIT} AND side='buy'  THEN 1 ELSE 0 END),
+               SUM(CASE WHEN {SQL_IS_EXIT} AND side='buy'  AND estimated_pnl>0 THEN 1 ELSE 0 END),
+               ROUND(SUM(CASE WHEN {SQL_IS_EXIT} AND side='buy'  THEN estimated_pnl ELSE 0 END), 4)
         FROM shadow_fills
         WHERE timestamp >= ? AND timestamp < ?
         GROUP BY strategy, symbol
@@ -546,9 +531,16 @@ def _make_png1_overview(since_jst, until_jst, indicators, stats, ls_map, out_pat
                         color=col_txt, va='center', ha='center',
                         fontweight=fw, zorder=3)
 
-        # データ: 3戦略 × (total, Long, Short)
+        # データ: エントリーがあった戦略のみ (total, Long, Short) を表示
+        # （9戦略全表示はカードに収まらないため、PnL順に最大5戦略）
+        active_sts = [st for st in STRATEGIES
+                      if (stat_map.get((st, sym)) or {}).get('fills', 0) > 0]
+        active_sts.sort(key=lambda s: stat_map[(s, sym)]['pnl'], reverse=True)
+        shown_sts = active_sts[:5]
+        n_hidden = len(active_sts) - len(shown_sts)
+        n_silent = len(STRATEGIES) - len(active_sts)
         cursor_top = tbl_top - hdr_h
-        for si, st in enumerate(STRATEGIES):
+        for si, st in enumerate(shown_sts):
             r = stat_map.get((st, sym))
             ls = ls_map.get((st, sym))
 
@@ -623,6 +615,13 @@ def _make_png1_overview(since_jst, until_jst, indicators, stats, ls_map, out_pat
                       fw_pnl_dollar='normal', pnl_pct_color=s_pct_color,
                       font_size=7.5, indent=True)
             cursor_top -= ls_row_h
+
+        if n_silent or n_hidden:
+            note = f"エントリーなし {n_silent}戦略（③の0件診断参照）"
+            if n_hidden:
+                note += f" ／ 表示枠外 {n_hidden}戦略"
+            ax.text(0.505, cursor_top - 0.025, note,
+                    fontsize=7.2, color='#888', va='top')
 
         # 戦略別所見（カード下端）
         sym_rows = [stat_map.get((st, sym)) for st in STRATEGIES]
@@ -745,6 +744,43 @@ def _build_silent_diagnosis(strategy, symbol, ind, stat):
             f"期間レンジ幅 {ind['range_pct']:.2f}% / トレンド {TREND_JP[ind['trend']]}。"
             f"MMは提示中と思われるが、この銘柄では対向flowが薄く約定が取れていない。"
             f"ボラティリティ補正（0.6-3.0x）が縮小側で維持された可能性もある。"
+        )
+    if not ind:
+        return "データ取得失敗のため診断不能。"
+    if strategy in ('rsi30', 'rsi30_fibo'):
+        touches = ind['rsi_touches_30'] + ind['rsi_touches_70']
+        if touches == 0:
+            return (
+                f"RSIが {ind['rsi_min']:.0f}〜{ind['rsi_max']:.0f} のレンジ内に留まり、"
+                f"30/70への到達が0回でアーミング自体が発生せず。"
+            )
+        return (
+            f"RSI 30到達{ind['rsi_touches_30']}回 / 70到達{ind['rsi_touches_70']}回はあったが、"
+            f"反転確認・EMA・BB・トレンド方向のいずれかのフィルターで除外。"
+        )
+    if strategy == 'bb_rsi':
+        touches = ind['bb_lower_touches'] + ind['bb_upper_touches']
+        if touches == 0:
+            return "BBバンドタッチが0回で、エントリートリガー自体が発生せず。"
+        return (
+            f"BBタッチは 下限{ind['bb_lower_touches']}回 / 上限{ind['bb_upper_touches']}回あったが、"
+            f"5分足200EMAの傾き（{TREND_JP[ind['ema_trend']]}）と方向不一致で除外。"
+        )
+    if strategy == 'breakout':
+        return (
+            f"ATRスパイク×{ind['atr_spike_ratio']:.2f}（閾値×2.0）/ "
+            f"出来高スパイク×{ind['vol_spike_ratio']:.2f}（閾値×1.5）。"
+            f"高安ブレイクとの3条件同時成立が必要なため未発火。"
+        )
+    if strategy == 'session_bo':
+        return (
+            f"アジア時間レンジのブレイクが未発生、または1日1回制限内で条件未達。"
+            f"期間値幅 {ind['range_pct']:.2f}% / トレンド {TREND_JP[ind['trend']]}。"
+        )
+    if strategy.startswith('pivot'):
+        return (
+            f"ピボットライン到達時の反発/重なり条件が未成立。"
+            f"トレンド {TREND_JP[ind['trend']]} / 値幅 {ind['range_pct']:.2f}%。"
         )
     return "診断ルール未定義。"
 
@@ -912,15 +948,15 @@ def _make_png3_strategy(since_jst, until_jst, indicators, stats, out_path):
             f"・逆風は {worst['strategy']} × {worst['symbol']}/USDC の ${worst['pnl']:+.2f}"
             f"（相場方向との相性が悪かった可能性）"
         )
-    lines.append(
-        "・全体ではMM系（full_mm/simple_mm）がレンジ・小幅変動銘柄で利益を積み上げ、"
-        "macd_vwap系はMACDクロス頻度とEMAフィルターの同方向一致が条件のため、"
-        "トレンド転換局面でない今期間は発火限定的でした。"
-    )
-    lines.append(
-        "・機会逸失（floor_triggered等の安全装置発動）の記録は本期間のDBにはありません。"
-        "取引0件の組合せは純粋に条件未達による不発です。"
-    )
+    total_closes = sum(r['closes'] for r in stats)
+    total_wins = sum(r['wins'] for r in stats)
+    if total_closes > 0:
+        lines.append(
+            f"・全戦略合計で {total_closes}決済、勝率 {total_wins / total_closes * 100:.0f}%。"
+            f"決済0件の組合せは条件未達（詳細は上の0件診断カード参照）。"
+        )
+    else:
+        lines.append("・本期間は全戦略で決済が発生しませんでした（0件診断カード参照）。")
     ax_s.text(0.02, 0.95, "\n".join(lines), fontsize=9.8, color='#222', va='top',
               bbox=dict(boxstyle='round,pad=0.7', facecolor='#fff8e1',
                         edgecolor='#ffa000'))
