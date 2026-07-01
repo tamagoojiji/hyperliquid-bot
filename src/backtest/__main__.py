@@ -21,7 +21,7 @@ from src.config import FeeConfig
 # session_bo の部分利確はTP1加重平均価格の単一exitとして表現される。
 _STRATEGY_REGISTRY: dict[str, tuple[str, str, str | None]] = {
     "rsi30":        ("src.strategies.rsi30.RSI30Strategy", "30m", None),
-    "bb_rsi":       ("src.strategies.bb_rsi.BBRSIStrategy", "30m", None),
+    "bb_rsi":       ("src.strategies.bb_rsi.BBRSIStrategy", "5m", None),
     "pivot_bounce": ("src.strategies.pivot_bounce.PivotBounceStrategy", "5m", "30m"),
     "breakout":     ("src.strategies.breakout.BreakoutStrategy", "5m", "30m"),
     "macd_vwap":    ("src.strategies.macd_vwap.MACDVWAPStrategy", "5m", "30m"),

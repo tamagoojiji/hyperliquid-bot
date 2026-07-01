@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import math
 import time
 from typing import Any
 
@@ -68,6 +69,15 @@ class HyperliquidClient:
     def round_size(self, symbol: str, size: float) -> float:
         decimals = self.get_sz_decimals(symbol)
         return round(size, decimals)
+
+    def round_price(self, symbol: str, price: float) -> float:
+        """HL価格ルール: 有効数字5桁以内 かつ 小数点以下 (6 − szDecimals) 桁以内"""
+        if price <= 0:
+            return price
+        max_decimals = max(0, 6 - self.get_sz_decimals(symbol))
+        exponent = math.floor(math.log10(abs(price)))
+        sig_rounded = round(price, 4 - exponent)  # 有効数字5桁
+        return round(sig_rounded, max_decimals)
 
     # ── 照会API ──
 
@@ -177,6 +187,8 @@ class HyperliquidClient:
         sz = self.round_size(symbol, abs(size))
         if sz <= 0:
             return None
+        if price is not None:
+            price = self.round_price(symbol, price)
 
         try:
             if order_type == "limit" and price is not None:
@@ -194,10 +206,11 @@ class HyperliquidClient:
             else:
                 # Market order (IOC with slippage)
                 mid = self.get_mid_price(symbol)
-                if mid is None:
+                if mid is None or mid <= 0:
                     return None
                 slippage = 0.005  # 0.5%
                 px = mid * (1 + slippage) if is_buy else mid * (1 - slippage)
+                px = self.round_price(symbol, px)
                 result = self._exchange.order(
                     symbol, is_buy, sz, px,
                     {"limit": {"tif": "Ioc"}},

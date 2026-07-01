@@ -360,12 +360,15 @@ class Bot:
 
         if self.cfg.mode == "live":
             size = signal.size_usd / candle.close
+            # 逆張り系(is_maker=True)=指値、ブレイク系(is_maker=False)=成行
+            # （taker想定シグナルをPost-Only指値で出すと約定せず幽霊ポジションになる）
+            order_type = "limit" if signal.is_maker else "market"
             result = await self.hl.place_order(
                 symbol=self.cfg.symbol,
                 is_buy=is_buy,
                 size=size,
-                price=signal.price,
-                order_type="limit",
+                price=signal.price if order_type == "limit" else None,
+                order_type=order_type,
             )
             if result:
                 await self.db.insert_order(
@@ -374,7 +377,7 @@ class Bot:
                     side=side,
                     price=signal.price,
                     size=size,
-                    order_type="limit",
+                    order_type=order_type,
                     status="placed",
                 )
             else:
