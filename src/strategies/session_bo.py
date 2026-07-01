@@ -119,7 +119,9 @@ class SessionBreakoutStrategy(BaseStrategy):
                     f"width={self._range_high - self._range_low:.2f}"
                 )
 
+        # セッション終了時刻に達したら強制クローズ（日またぎ禁止）
         if hour >= self.cfg.session_end_hour_utc and self._has_position:
+            self._force_close(candle.close)
             return Signal(type=SignalType.NONE)
 
         if self._has_position or self._entered_today or not self._range_ready:
@@ -215,7 +217,7 @@ class SessionBreakoutStrategy(BaseStrategy):
             "force_close", is_maker=False,
         )
         log.info(
-            f"Force close (day change): {self._position_side} "
+            f"Force close (session end): {self._position_side} "
             f"entry={self._entry_price:.2f} exit={price:.2f}"
         )
         self._reset_position()
