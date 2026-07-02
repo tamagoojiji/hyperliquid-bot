@@ -148,10 +148,11 @@ def run_backtest(
             filter_idx += 1
 
         # この足の開始時刻までのfundingイベントを保有ポジションに適用
+        # （エントリー時刻＝足のクローズなので、それ以前のイベントは対象外）
         while funding_idx < len(fr) and fr[funding_idx][0] <= candle.timestamp:
-            _, rate = fr[funding_idx]
+            f_ts, rate = fr[funding_idx]
             funding_idx += 1
-            if open_entry_ts is None:
+            if open_entry_ts is None or f_ts <= open_entry_ts:
                 continue
             notional = open_size_usd * (candle.open / open_entry_price)
             sign = 1.0 if open_side == "buy" else -1.0
@@ -161,7 +162,7 @@ def run_backtest(
         if open_entry_ts is not None:
             exit_evt = _walk_intrabar(candle, strategy)
             if exit_evt is not None:
-                _settle(exit_evt, candle.timestamp)
+                _settle(exit_evt, candle.timestamp + entry_int)
 
         # キャンドル確定 → エントリーシグナル判定
         signal: Signal = strategy.on_candle(candle)
@@ -171,11 +172,12 @@ def run_backtest(
         if open_entry_ts is not None:
             exit_evt = strategy.consume_exit_event()
             if exit_evt is not None:
-                _settle(exit_evt, candle.timestamp)
+                _settle(exit_evt, candle.timestamp + entry_int)
 
         # 新規エントリー（既存ポジが無いとき）
+        # シグナルは足のクローズで確定するため、約定時刻もクローズ時刻で記録する
         if signal.type in (SignalType.BUY, SignalType.SELL) and open_entry_ts is None:
-            open_entry_ts = candle.timestamp
+            open_entry_ts = candle.timestamp + entry_int
             open_entry_price = signal.price or candle.close
             open_side = "buy" if signal.type == SignalType.BUY else "sell"
             open_size_usd = signal.size_usd or 10.0
@@ -187,7 +189,7 @@ def run_backtest(
         _settle(
             ExitEvent(side=open_side, exit_price=last.close,
                       reason="forced_eob", is_maker=False),
-            last.timestamp,
+            last.timestamp + entry_int,
         )
 
     return {
