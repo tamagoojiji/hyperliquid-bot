@@ -3,6 +3,7 @@
 import asyncio
 import json
 import math
+import random
 import time
 from typing import Any
 
@@ -158,15 +159,23 @@ class HyperliquidClient:
         return ctx["funding"] if ctx else None
 
     def get_candles(self, symbol: str, interval: str, limit: int = 500) -> list[dict]:
-        """ヒストリカルキャンドルデータ取得"""
-        try:
-            end_time = int(time.time() * 1000)
-            start_time = end_time - (limit * _interval_to_ms(interval))
-            candles = self._info.candles_snapshot(symbol, interval, start_time, end_time)
-            return candles
-        except Exception as e:
-            log.error(f"Failed to get candles: {e}")
-            return []
+        """ヒストリカルキャンドルデータ取得
+
+        複数コンテナの同時再起動でレート制限(422等)を受けることがあるため、
+        ジッター付きバックオフでリトライする。
+        """
+        for attempt in range(4):
+            try:
+                end_time = int(time.time() * 1000)
+                start_time = end_time - (limit * _interval_to_ms(interval))
+                candles = self._info.candles_snapshot(symbol, interval, start_time, end_time)
+                if candles:
+                    return candles
+                log.warning(f"Empty candles for {symbol} {interval} (attempt {attempt + 1})")
+            except Exception as e:
+                log.error(f"Failed to get candles (attempt {attempt + 1}): {e}")
+            time.sleep(2 * (attempt + 1) + random.uniform(0, 2))
+        return []
 
     # ── 注文API ──
 
