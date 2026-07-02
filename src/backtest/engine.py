@@ -104,8 +104,19 @@ def run_backtest(
     def _settle(exit_evt, ts: float):
         """ExitEventでオープンポジションを決済し、Trade記録・残高更新を行う"""
         nonlocal balance, open_entry_ts, open_entry_price, open_side, open_size_usd, open_is_maker
-        nonlocal open_funding_usd
+        nonlocal open_funding_usd, funding_idx
         exit_price = exit_evt.exit_price
+
+        # 決済時刻までに発生した未処理funding（足の開始〜クローズ間のイベント）を精算。
+        # マーク価格は決済価格で近似する
+        while funding_idx < len(fr) and fr[funding_idx][0] <= ts:
+            f_ts, rate = fr[funding_idx]
+            funding_idx += 1
+            if f_ts <= open_entry_ts:
+                continue
+            notional = open_size_usd * (exit_price / open_entry_price)
+            sign = 1.0 if open_side == "buy" else -1.0
+            open_funding_usd += notional * rate * sign
         exit_fee_bps = maker_bps if exit_evt.is_maker else taker_bps
         entry_fee_bps = maker_bps if open_is_maker else taker_bps
         entry_fee = open_size_usd * (entry_fee_bps / 10_000.0)
