@@ -105,13 +105,18 @@ def fetch_funding_history(
 
 
 def aggregate_to_30m(c5m: list[Candle]) -> list[Candle]:
-    """5分足 → 30分足に集約（6本まとめる）"""
+    """5分足 → 30分足に集約（6本揃ったバケットのみ出力）
+
+    期首の半端足やデータ欠損で6本未満のバケットは、歪んだ30m足として
+    フィルターに流れないよう破棄する。
+    """
     out: list[Candle] = []
     bucket: list[Candle] = []
     for c in c5m:
         bucket_start = (int(c.timestamp) // 1800) * 1800
         if bucket and (int(bucket[0].timestamp) // 1800) * 1800 != bucket_start:
-            out.append(_merge_bucket(bucket))
+            if len(bucket) == 6:
+                out.append(_merge_bucket(bucket))
             bucket = []
         bucket.append(c)
     if bucket and len(bucket) == 6:
