@@ -74,6 +74,36 @@ def fetch_candles(symbol: str, interval: str, limit: int = _HL_MAX_CANDLES_PER_R
     return [_to_candle(c) for c in collected]
 
 
+def fetch_funding_history(
+    symbol: str,
+    start_ms: int,
+    end_ms: int | None = None,
+) -> list[tuple[float, float]]:
+    """HLのfunding履歴を取得。[(ts_sec, rate_1h), ...] を昇順で返す。
+
+    APIは1リクエスト最大500件（約20日分）のためページネーションする。
+    """
+    info = Info(constants.MAINNET_API_URL, skip_ws=True)
+    end_ms = end_ms or int(time.time() * 1000)
+    out: list[tuple[float, float]] = []
+    cursor = start_ms
+    while cursor < end_ms:
+        batch = info.funding_history(symbol, cursor, end_ms)
+        if not batch:
+            break
+        for f in batch:
+            out.append((f["time"] / 1000.0, float(f["fundingRate"])))
+        last_t = int(batch[-1]["time"])
+        if last_t <= cursor:
+            break
+        cursor = last_t + 1
+        if len(batch) < 500:
+            break
+        time.sleep(0.2)  # rate limit配慮
+    out.sort(key=lambda x: x[0])
+    return out
+
+
 def aggregate_to_30m(c5m: list[Candle]) -> list[Candle]:
     """5分足 → 30分足に集約（6本まとめる）"""
     out: list[Candle] = []

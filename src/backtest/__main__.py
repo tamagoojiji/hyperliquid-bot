@@ -7,7 +7,7 @@
 
 import argparse
 
-from src.backtest.historical import fetch_candles, aggregate_to_30m
+from src.backtest.historical import fetch_candles, fetch_funding_history, aggregate_to_30m
 from src.backtest.engine import run_backtest
 from src.backtest.metrics import summarize, print_summary, print_trade_log
 from src.config import FeeConfig
@@ -46,6 +46,7 @@ def main():
     parser.add_argument("--timeframe", help="エントリー足 override (例: 30m / 1h / 4h / 1d)")
     parser.add_argument("--initial", type=float, default=100.0, help="初期資金 USD")
     parser.add_argument("--trade-log", action="store_true", help="直近トレードを表示")
+    parser.add_argument("--no-funding", action="store_true", help="funding反映を無効化")
     args = parser.parse_args()
 
     cls_path, default_entry_tf, filter_tf = _STRATEGY_REGISTRY[args.strategy]
@@ -63,6 +64,14 @@ def main():
         filter_candles = fetch_candles(args.symbol, "30m")
         print(f"[fetch] filter candles: {len(filter_candles)} 本")
 
+    funding_rates = None
+    if not args.no_funding and entry_candles:
+        print(f"[fetch] {args.symbol} funding履歴取得中...")
+        funding_rates = fetch_funding_history(
+            args.symbol, int(entry_candles[0].timestamp * 1000)
+        )
+        print(f"[fetch] funding: {len(funding_rates)}件")
+
     fee = FeeConfig.from_env()
     print(f"[run ] strategy={args.strategy} maker={fee.maker_bps}bps taker={fee.taker_bps}bps")
 
@@ -73,6 +82,7 @@ def main():
         maker_bps=fee.maker_bps,
         taker_bps=fee.taker_bps,
         initial_balance=args.initial,
+        funding_rates=funding_rates,
     )
     summary = summarize(result)
     print_summary(args.strategy, args.symbol, result, summary)

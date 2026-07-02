@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 
-from src.strategies.base import BaseStrategy, Signal, SignalType
+from src.strategies.base import BaseStrategy, ExitEvent, Signal, SignalType
 from src.data.candle_builder import Candle
 
 
@@ -16,7 +16,8 @@ class Trade:
     size_usd: float
     reason: str          # "take_profit" / "stop_loss" / "forced"
     fee_usd: float
-    pnl_usd: float       # 手数料控除後
+    pnl_usd: float       # 手数料・funding控除後
+    funding_usd: float = 0.0  # 保有中に発生したfunding（正=支払い）
 
     @property
     def hold_seconds(self) -> float:
@@ -53,6 +54,7 @@ def run_backtest(
     maker_bps: float = 1.5,
     taker_bps: float = 4.5,
     initial_balance: float = 100.0,
+    funding_rates: list[tuple[float, float]] | None = None,
 ) -> dict:
     """バックテスト実行。
 
@@ -61,6 +63,8 @@ def run_backtest(
         entry_candles: エントリー判定足
         filter_candles: フィルター足（5分足戦略のみ。30分足リスト）
         maker_bps / taker_bps: 手数料
+        funding_rates: [(ts_sec, 1時間funding率), ...] 昇順。
+            保有中のイベントごとに notional × rate を適用（ロング=支払い、ショート=受取）
         initial_balance: 初期資金（PnL累計用）
 
     Returns:
@@ -92,10 +96,15 @@ def run_backtest(
     open_side: str = ""
     open_size_usd: float = 0.0
     open_is_maker: bool = False
+    open_funding_usd: float = 0.0
+
+    fr = funding_rates or []
+    funding_idx = 0
 
     def _settle(exit_evt, ts: float):
         """ExitEventでオープンポジションを決済し、Trade記録・残高更新を行う"""
         nonlocal balance, open_entry_ts, open_entry_price, open_side, open_size_usd, open_is_maker
+        nonlocal open_funding_usd
         exit_price = exit_evt.exit_price
         exit_fee_bps = maker_bps if exit_evt.is_maker else taker_bps
         entry_fee_bps = maker_bps if open_is_maker else taker_bps
@@ -106,7 +115,7 @@ def run_backtest(
             gross = open_size_usd * (exit_price / open_entry_price - 1.0)
         else:
             gross = open_size_usd * (1.0 - exit_price / open_entry_price)
-        pnl = gross - fee_total
+        pnl = gross - fee_total - open_funding_usd
         balance += pnl
         trades.append(Trade(
             entry_ts=open_entry_ts,
@@ -118,6 +127,7 @@ def run_backtest(
             reason=exit_evt.reason,
             fee_usd=fee_total,
             pnl_usd=pnl,
+            funding_usd=open_funding_usd,
         ))
         equity_curve.append((ts, balance))
         open_entry_ts = None
@@ -125,6 +135,7 @@ def run_backtest(
         open_entry_price = 0.0
         open_size_usd = 0.0
         open_is_maker = False
+        open_funding_usd = 0.0
 
     for candle in entry_candles:
         # 確定済みフィルター足を先に流す（フィルター足クローズ ≤ エントリー足クローズ）
@@ -135,6 +146,16 @@ def run_backtest(
             if hasattr(strategy, "on_filter_candle"):
                 strategy.on_filter_candle(fc)
             filter_idx += 1
+
+        # この足の開始時刻までのfundingイベントを保有ポジションに適用
+        while funding_idx < len(fr) and fr[funding_idx][0] <= candle.timestamp:
+            _, rate = fr[funding_idx]
+            funding_idx += 1
+            if open_entry_ts is None:
+                continue
+            notional = open_size_usd * (candle.open / open_entry_price)
+            sign = 1.0 if open_side == "buy" else -1.0
+            open_funding_usd += notional * rate * sign
 
         # まずキャンドル内の値動きで既存ポジションのSL/TP判定
         if open_entry_ts is not None:
@@ -160,32 +181,14 @@ def run_backtest(
             open_size_usd = signal.size_usd or 10.0
             open_is_maker = signal.is_maker
 
-    # 期間終了時に未決済 → 強制クローズ（成行扱い）
+    # 期間終了時に未決済 → 強制クローズ（成行扱い、funding込みで_settleに統一）
     if open_entry_ts is not None and entry_candles:
         last = entry_candles[-1]
-        exit_price = last.close
-        entry_fee_bps = maker_bps if open_is_maker else taker_bps
-        entry_fee = open_size_usd * (entry_fee_bps / 10_000.0)
-        exit_fee = open_size_usd * (taker_bps / 10_000.0)
-        fee_total = entry_fee + exit_fee
-        if open_side == "buy":
-            gross = open_size_usd * (exit_price / open_entry_price - 1.0)
-        else:
-            gross = open_size_usd * (1.0 - exit_price / open_entry_price)
-        pnl = gross - fee_total
-        balance += pnl
-        trades.append(Trade(
-            entry_ts=open_entry_ts,
-            exit_ts=last.timestamp,
-            side=open_side,
-            entry_price=open_entry_price,
-            exit_price=exit_price,
-            size_usd=open_size_usd,
-            reason="forced_eob",
-            fee_usd=fee_total,
-            pnl_usd=pnl,
-        ))
-        equity_curve.append((last.timestamp, balance))
+        _settle(
+            ExitEvent(side=open_side, exit_price=last.close,
+                      reason="forced_eob", is_maker=False),
+            last.timestamp,
+        )
 
     return {
         "trades": trades,
