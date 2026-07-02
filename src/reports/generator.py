@@ -30,6 +30,7 @@ SYMBOLS = ['BTC', 'SOL']
 STRATEGIES = [
     'rsi30', 'pivot_bounce', 'breakout', 'macd_vwap', 'rsi30_fibo',
     'pivot_bb', 'pivot_vwap', 'session_bo', 'bb_rsi', 'donchian',
+    'ema3030', 'gmma',
 ]
 # エントリー/決済のfill_model判定（directional='entry'/'exit_*'、MM系='mm_sim'/'mm_sim_exit'）
 SQL_IS_ENTRY = "(fill_model IN ('mm_sim','touch','entry'))"
