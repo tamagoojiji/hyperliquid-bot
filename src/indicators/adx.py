@@ -72,6 +72,18 @@ class ADX:
         return self._adx
 
     @property
+    def plus_di(self) -> float | None:
+        if self._smooth_tr <= 0 or self._count < self.period:
+            return None
+        return 100.0 * self._smooth_plus_dm / self._smooth_tr
+
+    @property
+    def minus_di(self) -> float | None:
+        if self._smooth_tr <= 0 or self._count < self.period:
+            return None
+        return 100.0 * self._smooth_minus_dm / self._smooth_tr
+
+    @property
     def ready(self) -> bool:
         # DXのWilder平滑が安定するまで約2period本必要
         return self._count >= self.period * 2 and self._adx is not None

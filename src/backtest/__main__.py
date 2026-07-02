@@ -30,6 +30,14 @@ _STRATEGY_REGISTRY: dict[str, tuple[str, str, str | None]] = {
     "pivot_vwap":   ("src.strategies.pivot_vwap.PivotVWAPStrategy", "5m", "30m"),
     "session_bo":   ("src.strategies.session_bo.SessionBreakoutStrategy", "5m", None),
     "donchian":     ("src.strategies.donchian.DonchianStrategy", "1d", None),
+    # 魔法の杖DB由来（2026-07-02追加）
+    "ema3030":      ("src.strategies.ema3030.EMA3030Strategy", "30m", None),
+    "anti_macd":    ("src.strategies.anti_macd.AntiMACDStrategy", "30m", None),
+    "gmma":         ("src.strategies.gmma.GMMAStrategy", "1h", None),
+    "adx_dmi":      ("src.strategies.adx_dmi.ADXDMIStrategy", "4h", None),
+    "paraboli":     ("src.strategies.paraboli.ParaboliStrategy", "4h", None),
+    "gap_fill":     ("src.strategies.gap_fill.GapFillStrategy", "5m", None),
+    "kinboko":      ("src.strategies.kinboko.KinbokoStrategy", "1d", None),
 }
 
 

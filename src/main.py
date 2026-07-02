@@ -22,6 +22,13 @@ from src.strategies.pivot_vwap import PivotVWAPStrategy
 from src.strategies.session_bo import SessionBreakoutStrategy
 from src.strategies.bb_rsi import BBRSIStrategy
 from src.strategies.donchian import DonchianStrategy
+from src.strategies.ema3030 import EMA3030Strategy
+from src.strategies.gmma import GMMAStrategy
+from src.strategies.adx_dmi import ADXDMIStrategy
+from src.strategies.anti_macd import AntiMACDStrategy
+from src.strategies.gap_fill import GapFillStrategy
+from src.strategies.paraboli import ParaboliStrategy
+from src.strategies.kinboko import KinbokoStrategy
 from src.data.candle_builder import CandleBuilder, Candle
 from src.indicators.ema import EMA
 from src.data.db import Database
@@ -38,6 +45,22 @@ from src.utils.logger import get_logger
 from src.utils.reconcile import reconcile_on_startup
 
 log = get_logger("main")
+
+# 戦略名 → エントリー足（warmup・シグナル配線の単一情報源）
+STRATEGY_ENTRY_TF = {
+    "rsi30": "30m", "ema3030": "30m", "anti_macd": "30m",
+    "simple_mm": "5m", "full_mm": "5m",
+    "pivot_bounce": "5m", "breakout": "5m", "macd_vwap": "5m", "rsi30_fibo": "5m",
+    "pivot_bb": "5m", "pivot_vwap": "5m", "session_bo": "5m", "bb_rsi": "5m",
+    "gap_fill": "5m",
+    "gmma": "1h",
+    "adx_dmi": "4h", "paraboli": "4h",
+    "donchian": "1d", "kinboko": "1d",
+}
+# 30分足をフィルターとして受け取る5分足戦略
+FILTER_30M_STRATEGIES = (
+    "pivot_bounce", "breakout", "macd_vwap", "rsi30_fibo", "pivot_bb", "pivot_vwap",
+)
 
 
 class Bot:
@@ -71,6 +94,8 @@ class Bot:
         # キャンドルビルダー
         self.candle_5m = CandleBuilder(interval_seconds=300)
         self.candle_30m = CandleBuilder(interval_seconds=1800)
+        self.candle_1h = CandleBuilder(interval_seconds=3600)
+        self.candle_4h = CandleBuilder(interval_seconds=14400)
         self.candle_1d = CandleBuilder(interval_seconds=86400)
 
         # 日足200EMA — 全directional戦略の方向フィルター（上=ロングのみ/下=ショートのみ）
@@ -110,10 +135,24 @@ class Bot:
             return BBRSIStrategy(self.cfg.symbol, self.cfg.mode)
         elif self.cfg.strategy == "donchian":
             return DonchianStrategy(self.cfg.symbol, self.cfg.mode, self.cfg.donchian)
+        elif self.cfg.strategy == "ema3030":
+            return EMA3030Strategy(self.cfg.symbol, self.cfg.mode)
+        elif self.cfg.strategy == "gmma":
+            return GMMAStrategy(self.cfg.symbol, self.cfg.mode)
+        elif self.cfg.strategy == "adx_dmi":
+            return ADXDMIStrategy(self.cfg.symbol, self.cfg.mode)
+        elif self.cfg.strategy == "anti_macd":
+            return AntiMACDStrategy(self.cfg.symbol, self.cfg.mode)
+        elif self.cfg.strategy == "gap_fill":
+            return GapFillStrategy(self.cfg.symbol, self.cfg.mode)
+        elif self.cfg.strategy == "kinboko":
+            return KinbokoStrategy(self.cfg.symbol, self.cfg.mode)
+        elif self.cfg.strategy == "paraboli":
+            return ParaboliStrategy(self.cfg.symbol, self.cfg.mode)
         raise ValueError(f"Unknown strategy: {self.cfg.strategy}")
 
     def _get_risk_config(self) -> dict:
-        if self.cfg.strategy in ("rsi30", "pivot_bounce", "breakout", "macd_vwap", "rsi30_fibo", "pivot_bb", "pivot_vwap", "bb_rsi"):
+        if self.cfg.strategy in ("rsi30", "pivot_bounce", "breakout", "macd_vwap", "rsi30_fibo", "pivot_bb", "pivot_vwap", "bb_rsi", "ema3030", "gmma", "adx_dmi", "anti_macd", "gap_fill", "paraboli", "kinboko"):
             return {
                 "max_loss": self.cfg.rsi30.max_loss_usd,
                 "max_position": self.cfg.rsi30.max_position_usd,
@@ -194,47 +233,19 @@ class Bot:
             await self.shutdown()
 
     async def _load_historical_candles(self):
-        """過去キャンドルデータでインジケーターをウォームアップ"""
+        """過去キャンドルデータでインジケーターをウォームアップ
+
+        STRATEGY_ENTRY_TF に基づき、エントリー足は strategy.on_candle へ、
+        30分フィルター足は on_filter_candle へ流す。
+        """
         log.info("Loading historical candles...")
+        entry_tf = STRATEGY_ENTRY_TF.get(self.cfg.strategy, "5m")
+        is_mm = self.cfg.strategy in ("simple_mm", "full_mm")
 
-        # 5分足 — bb_rsiは5分足200EMA用に多めに取得
-        candles_5m_limit = 300 if self.cfg.strategy == "bb_rsi" else 200
-        candles_5m = self.hl.get_candles(self.cfg.symbol, "5m", limit=candles_5m_limit)
-        for c in candles_5m:
-            candle = Candle(
-                timestamp=c["t"] / 1000,
-                open=float(c["o"]),
-                high=float(c["h"]),
-                low=float(c["l"]),
-                close=float(c["c"]),
-                volume=float(c.get("v", 0)),
-            )
-            self.candle_5m.load_single(candle)
-            if self.cfg.strategy in ("pivot_bounce", "breakout", "macd_vwap", "rsi30_fibo", "pivot_bb", "pivot_vwap", "session_bo", "bb_rsi"):
-                self.strategy.on_candle(candle)
-
-        # 30分足 — rsi30は200EMA用に多めに取得
-        candles_30m_limit = 300 if self.cfg.strategy == "rsi30" else 100
-        candles_30m = self.hl.get_candles(self.cfg.symbol, "30m", limit=candles_30m_limit)
-        for c in candles_30m:
-            candle = Candle(
-                timestamp=c["t"] / 1000,
-                open=float(c["o"]),
-                high=float(c["h"]),
-                low=float(c["l"]),
-                close=float(c["c"]),
-                volume=float(c.get("v", 0)),
-            )
-            self.candle_30m.load_single(candle)
-            if self.cfg.strategy == "rsi30":
-                self.strategy.on_candle(candle)
-            elif self.cfg.strategy in ("pivot_bounce", "breakout", "macd_vwap", "rsi30_fibo", "pivot_bb", "pivot_vwap"):
-                self.strategy.on_filter_candle(candle)
-
-        # 日足 — donchianのチャネル/ATR + 全directional戦略の200EMA方向フィルター用
-        if self.cfg.strategy not in ("simple_mm", "full_mm"):
-            candles_1d = self.hl.get_candles(self.cfg.symbol, "1d", limit=250)
-            for c in candles_1d:
+        def _load(builder, interval: str, limit: int,
+                  feed_entry: bool, feed_filter: bool = False) -> int:
+            raw = self.hl.get_candles(self.cfg.symbol, interval, limit=limit)
+            for c in raw:
                 candle = Candle(
                     timestamp=c["t"] / 1000,
                     open=float(c["o"]),
@@ -243,14 +254,35 @@ class Bot:
                     close=float(c["c"]),
                     volume=float(c.get("v", 0)),
                 )
-                self.candle_1d.load_single(candle)
-                self.trend_ema_1d.update(candle.close)
-                if self.cfg.strategy == "donchian":
+                if builder is not None:
+                    builder.load_single(candle)
+                if interval == "1d":
+                    self.trend_ema_1d.update(candle.close)
+                if feed_entry:
                     self.strategy.on_candle(candle)
-            log.info(
-                f"Loaded {len(candles_1d)} 1d candles "
-                f"(EMA200 ready: {self.trend_ema_1d.ready})"
-            )
+                elif feed_filter:
+                    self.strategy.on_filter_candle(candle)
+            return len(raw)
+
+        # 5分足（MM含む全戦略でビルダーは常時ロード）
+        n5 = _load(self.candle_5m, "5m",
+                   300 if entry_tf == "5m" else 200,
+                   feed_entry=(entry_tf == "5m" and not is_mm))
+        # 30分足（エントリー or フィルター）
+        n30 = _load(self.candle_30m, "30m",
+                    300 if entry_tf == "30m" else 100,
+                    feed_entry=(entry_tf == "30m"),
+                    feed_filter=(self.cfg.strategy in FILTER_30M_STRATEGIES))
+        # 1時間足 / 4時間足（該当戦略のみ）
+        n1h = n4h = 0
+        if entry_tf == "1h":
+            n1h = _load(self.candle_1h, "1h", 300, feed_entry=True)
+        if entry_tf == "4h":
+            n4h = _load(self.candle_4h, "4h", 300, feed_entry=True)
+        # 日足（全directional戦略の200EMA方向フィルター + 1d戦略のエントリー足）
+        n1d = 0
+        if not is_mm:
+            n1d = _load(self.candle_1d, "1d", 250, feed_entry=(entry_tf == "1d"))
 
         # ウォームアップ中に立ったシグナルは注文/仮想ポジションを伴わないため、
         # 内部のポジション状態を破棄する（残すと以後のエントリーが恒久ブロックされる）
@@ -259,7 +291,8 @@ class Bot:
         self.strategy.reset_position_state()
 
         log.info(
-            f"Loaded {len(candles_5m)} 5m candles, {len(candles_30m)} 30m candles. "
+            f"Loaded 5m={n5} 30m={n30} 1h={n1h} 4h={n4h} 1d={n1d} candles "
+            f"(EMA200_1d ready: {self.trend_ema_1d.ready}). "
             f"Strategy ready: {self.strategy.ready()}"
         )
 
@@ -273,28 +306,33 @@ class Bot:
             # キャンドルビルダーに投入
             completed_5m = self.candle_5m.update(price, size, ts)
             completed_30m = self.candle_30m.update(price, size, ts)
+            completed_1h = self.candle_1h.update(price, size, ts)
+            completed_4h = self.candle_4h.update(price, size, ts)
             completed_1d = self.candle_1d.update(price, size, ts)
 
-            # 日足確定 → 200EMA更新 + donchianのシグナル判定
+            entry_tf = STRATEGY_ENTRY_TF.get(self.cfg.strategy, "5m")
+
+            # 日足確定 → 200EMA更新 + 日足戦略のシグナル判定
             if completed_1d:
                 self.trend_ema_1d.update(completed_1d.close)
-                if self.cfg.strategy == "donchian":
+                if entry_tf == "1d":
                     await self._process_candle(completed_1d)
 
-            # 30分足確定
+            if completed_4h and entry_tf == "4h":
+                await self._process_candle(completed_4h)
+
+            if completed_1h and entry_tf == "1h":
+                await self._process_candle(completed_1h)
+
+            # 30分足確定（エントリー or フィルター）
             if completed_30m:
-                if self.cfg.strategy == "rsi30":
-                    # rsi30は30分足でシグナル判定
+                if entry_tf == "30m":
                     await self._process_candle(completed_30m)
-                elif self.cfg.strategy in ("pivot_bounce", "breakout", "macd_vwap", "rsi30_fibo", "pivot_bb", "pivot_vwap"):
-                    # 他戦略は30分足をフィルターとして使用
+                elif self.cfg.strategy in FILTER_30M_STRATEGIES:
                     self.strategy.on_filter_candle(completed_30m)
 
-            # 5分足確定 → シグナル判定（rsi30=30分足 / donchian=日足 以外）
-            if completed_5m and self.cfg.strategy not in ("rsi30", "donchian"):
+            if completed_5m and entry_tf == "5m":
                 await self._process_candle(completed_5m)
-
-            # session_bo は30分足フィルター不要（5分足で直接レンジ構築）
 
             # リアルタイムSL/TP監視
             self.strategy.on_trade(price, size, ts)
@@ -808,7 +846,7 @@ class Bot:
 def parse_args():
     parser = argparse.ArgumentParser(description="Hyperliquid Trading Bot")
     parser.add_argument(
-        "--strategy", choices=["rsi30", "simple_mm", "full_mm", "pivot_bounce", "breakout", "macd_vwap", "rsi30_fibo", "pivot_bb", "pivot_vwap", "session_bo", "bb_rsi", "donchian"],
+        "--strategy", choices=list(STRATEGY_ENTRY_TF.keys()),
         default="rsi30", help="Trading strategy"
     )
     parser.add_argument(
