@@ -35,6 +35,8 @@ from src.data.db import Database
 from src.notify.discord import DiscordNotifier
 from src.risk.position import PositionTracker
 from src.risk.risk_manager import RiskManager
+from src.risk.funding_gate import FundingGate
+from src.backtest.historical import fetch_funding_history
 from src.risk.dry_run_pnl import (
     VirtualPosition,
     apply_funding,
@@ -101,9 +103,22 @@ class Bot:
         # 日足200EMA — 全directional戦略の方向フィルター（上=ロングのみ/下=ショートのみ）
         self.trend_ema_1d = EMA(period=200)
 
+        # FundingGate — 極端funding時の新規ロング抑制
+        self.funding_gate = (
+            FundingGate(
+                percentile=self.cfg.funding_gate.percentile,
+                lookback_hours=self.cfg.funding_gate.lookback_hours,
+                min_samples=self.cfg.funding_gate.min_samples,
+                long_action=self.cfg.funding_gate.long_action,
+            )
+            if (self.cfg.funding_gate.enabled
+                and self.cfg.strategy not in ("simple_mm", "full_mm"))
+            else None
+        )
+
         # ドライラン用: 仮想ポジション + funding rate キャッシュ
         self._virtual_positions: dict[str, VirtualPosition] = {}
-        self._current_funding_rate_1h: float = 0.0
+        self._current_funding_rate_1h: float | None = None
         self._virtual_pnl_total: float = 0.0
         self._virtual_fees_total: float = 0.0
         self._virtual_funding_total: float = 0.0
@@ -194,6 +209,10 @@ class Bot:
         # 過去キャンドルをロード
         await self._load_historical_candles()
 
+        # FundingGate 履歴シード（有効時のみ、失敗しても起動続行）
+        if self.funding_gate is not None:
+            self._seed_funding_gate()
+
         # 残高取得
         balance = self.hl.get_account_balance()
 
@@ -221,8 +240,10 @@ class Bot:
         if self.cfg.strategy in ("simple_mm", "full_mm"):
             tasks.append(asyncio.create_task(self._mm_quote_loop()))
 
-        # ドライラン時は funding rate 適用ループを起動
-        if self.cfg.mode == "dry" and self.cfg.fees.funding_enabled:
+        # funding rate 適用/ゲート更新ループを起動
+        # dry PnLへのfunding適用はFUNDING_ENABLED、ゲート更新はFUNDING_GATE_ENABLEDで独立制御
+        if (self.cfg.mode == "dry" and self.cfg.fees.funding_enabled) \
+                or self.funding_gate is not None:
             tasks.append(asyncio.create_task(self._funding_loop()))
 
         try:
@@ -375,6 +396,28 @@ class Bot:
                 # シグナル生成時に立てた戦略内部のポジション状態を破棄
                 self.strategy.reset_position_state()
                 return
+
+        # FundingGate: 極端funding時の新規ロング抑制（ショートは素通し）
+        if (self.funding_gate is not None
+                and self.cfg.strategy not in ("simple_mm", "full_mm")
+                and signal.type == SignalType.BUY):
+            rate = self._current_funding_rate_1h
+            allowed, mult, reason = self.funding_gate.check(rate)
+            thr = self.funding_gate.threshold
+            if not allowed:
+                log.info(
+                    f"[funding_gate] blocked long: rate={rate*100:.5f}%/h "
+                    f"p{int(self.cfg.funding_gate.percentile)}={thr*100:.5f}%/h"
+                )
+                self.strategy.reset_position_state()
+                return
+            if mult < 1.0:
+                signal.size_usd *= mult
+                log.info(
+                    f"[funding_gate] halved long size: rate={rate*100:.5f}%/h "
+                    f"p{int(self.cfg.funding_gate.percentile)}={thr*100:.5f}%/h "
+                    f"size_usd={signal.size_usd:.2f}"
+                )
 
         # リスクチェック
         pos = self.position_tracker.get(self.cfg.symbol)
@@ -726,6 +769,27 @@ class Bot:
             f"funding={result['funding']:.4f} net={result['net_pnl']:.4f}"
         )
 
+    def _seed_funding_gate(self):
+        """起動時に直近90日のfunding履歴を FundingGate に一括投入する
+
+        失敗しても起動は続行する（min_samples未満なら素通しなので安全）。
+        """
+        try:
+            lookback_ms = self.cfg.funding_gate.lookback_hours * 3600 * 1000
+            start_ms = int(time.time() * 1000) - lookback_ms
+            history = fetch_funding_history(self.cfg.symbol, start_ms)
+            rates = [r for _, r in history]
+            self.funding_gate.seed(rates)
+            # 初回fetch(最大1時間後)までゲートが無効化されないよう最新履歴値をキャッシュ
+            if rates:
+                self._current_funding_rate_1h = rates[-1]
+            log.info(
+                f"[funding_gate] seeded {len(rates)} funding samples "
+                f"(threshold ready: {self.funding_gate.threshold is not None})"
+            )
+        except Exception as e:
+            log.warning(f"[funding_gate] seed failed (continuing warmup): {e}")
+
     async def _funding_loop(self):
         """1時間ごとに funding rate を取得し、open中の仮想ポジションに適用
 
@@ -752,18 +816,21 @@ class Bot:
             if rate is None:
                 continue
             self._current_funding_rate_1h = rate
-            vp = self._virtual_positions.get(self.cfg.symbol)
-            if vp is None:
-                continue
-            current = self.candle_5m.current
-            if not current:
-                continue
-            delta = apply_funding(vp, current.close, rate)
-            self._virtual_funding_total += delta
-            log.info(
-                f"[funding] rate={rate*100:.4f}% applied to {vp.side} "
-                f"notional={abs(vp.size)*current.close:.2f} delta={delta:.4f}"
-            )
+            if self.funding_gate is not None:
+                self.funding_gate.update(rate)
+            if self.cfg.mode == "dry" and self.cfg.fees.funding_enabled:
+                vp = self._virtual_positions.get(self.cfg.symbol)
+                if vp is None:
+                    continue
+                current = self.candle_5m.current
+                if not current:
+                    continue
+                delta = apply_funding(vp, current.close, rate)
+                self._virtual_funding_total += delta
+                log.info(
+                    f"[funding] rate={rate*100:.4f}% applied to {vp.side} "
+                    f"notional={abs(vp.size)*current.close:.2f} delta={delta:.4f}"
+                )
 
     async def _main_loop(self):
         """メインループ — 状態監視"""

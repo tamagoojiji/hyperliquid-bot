@@ -132,6 +132,23 @@ class DonchianConfig:
     max_loss_usd: float = 20.0
 
 
+@dataclass
+class FundingGateConfig:
+    """FundingGate — 極端funding時の新規ロング抑制（検証: docs/検証-funding予測可能性-2026-07-11.md）"""
+    enabled: bool = True
+    percentile: float = 90.0
+    lookback_hours: int = 2160      # 90日
+    min_samples: int = 720          # 30日分溜まるまで素通し
+    long_action: str = "half"       # "half"=サイズ半減 / "block"=禁止
+
+    @classmethod
+    def from_env(cls) -> "FundingGateConfig":
+        return cls(
+            enabled=os.getenv("FUNDING_GATE_ENABLED", "1") not in ("0", "false", "False"),
+            long_action=os.getenv("FUNDING_GATE_ACTION", "half"),
+        )
+
+
 # ペア別MMパラメータオーバーライド
 MM_OVERRIDES: dict[str, dict] = {
     "SOL": {
@@ -156,6 +173,7 @@ class BotConfig:
     session_bo: SessionBOConfig = field(default_factory=SessionBOConfig)
     donchian: DonchianConfig = field(default_factory=DonchianConfig)
     fees: FeeConfig = field(default_factory=FeeConfig.from_env)
+    funding_gate: FundingGateConfig = field(default_factory=FundingGateConfig.from_env)
     # 日足200EMA方向フィルター（上=ロングのみ/下=ショートのみ。TREND_FILTER_ENABLED=0で無効化）
     trend_filter_enabled: bool = True
 
