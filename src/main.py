@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import signal
 import sys
+import random
 import time
 
 from src.config import BotConfig
@@ -772,23 +773,29 @@ class Bot:
     def _seed_funding_gate(self):
         """起動時に直近90日のfunding履歴を FundingGate に一括投入する
 
+        複数コンテナの同時再起動でレート制限(429)を受けることがあるため、
+        get_candles と同様にジッター付きバックオフでリトライする。
         失敗しても起動は続行する（min_samples未満なら素通しなので安全）。
         """
-        try:
-            lookback_ms = self.cfg.funding_gate.lookback_hours * 3600 * 1000
-            start_ms = int(time.time() * 1000) - lookback_ms
-            history = fetch_funding_history(self.cfg.symbol, start_ms)
-            rates = [r for _, r in history]
-            self.funding_gate.seed(rates)
-            # 初回fetch(最大1時間後)までゲートが無効化されないよう最新履歴値をキャッシュ
-            if rates:
-                self._current_funding_rate_1h = rates[-1]
-            log.info(
-                f"[funding_gate] seeded {len(rates)} funding samples "
-                f"(threshold ready: {self.funding_gate.threshold is not None})"
-            )
-        except Exception as e:
-            log.warning(f"[funding_gate] seed failed (continuing warmup): {e}")
+        for attempt in range(4):
+            try:
+                lookback_ms = self.cfg.funding_gate.lookback_hours * 3600 * 1000
+                start_ms = int(time.time() * 1000) - lookback_ms
+                history = fetch_funding_history(self.cfg.symbol, start_ms)
+                rates = [r for _, r in history]
+                self.funding_gate.seed(rates)
+                # 初回fetch(最大1時間後)までゲートが無効化されないよう最新履歴値をキャッシュ
+                if rates:
+                    self._current_funding_rate_1h = rates[-1]
+                log.info(
+                    f"[funding_gate] seeded {len(rates)} funding samples "
+                    f"(threshold ready: {self.funding_gate.threshold is not None})"
+                )
+                return
+            except Exception as e:
+                log.warning(f"[funding_gate] seed attempt {attempt + 1} failed: {e}")
+                time.sleep(5 * (attempt + 1) + random.uniform(0, 5))
+        log.warning("[funding_gate] seed failed after retries (continuing warmup)")
 
     async def _funding_loop(self):
         """1時間ごとに funding rate を取得し、open中の仮想ポジションに適用
