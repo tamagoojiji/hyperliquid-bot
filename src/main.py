@@ -210,10 +210,6 @@ class Bot:
         # 過去キャンドルをロード
         await self._load_historical_candles()
 
-        # FundingGate 履歴シード（有効時のみ、失敗しても起動続行）
-        if self.funding_gate is not None:
-            self._seed_funding_gate()
-
         # 残高取得
         balance = self.hl.get_account_balance()
 
@@ -246,6 +242,11 @@ class Bot:
         if (self.cfg.mode == "dry" and self.cfg.fees.funding_enabled) \
                 or self.funding_gate is not None:
             tasks.append(asyncio.create_task(self._funding_loop()))
+
+        # FundingGate 履歴シードはバックグラウンド化（herd分散のため起動を遅延）。
+        # シード完了前はゲートがwarmup素通しになるが、これは設計どおり安全。
+        if self.funding_gate is not None:
+            tasks.append(asyncio.create_task(self._seed_funding_gate()))
 
         try:
             await asyncio.gather(*tasks)
@@ -770,18 +771,24 @@ class Bot:
             f"funding={result['funding']:.4f} net={result['net_pnl']:.4f}"
         )
 
-    def _seed_funding_gate(self):
-        """起動時に直近90日のfunding履歴を FundingGate に一括投入する
+    async def _seed_funding_gate(self):
+        """起動時に直近90日のfunding履歴を FundingGate に一括投入する（バックグラウンド）
 
         複数コンテナの同時再起動でレート制限(429)を受けることがあるため、
-        get_candles と同様にジッター付きバックオフでリトライする。
-        失敗しても起動は続行する（min_samples未満なら素通しなので安全）。
+        起動を最大2分ランダムに遅らせてherd（同時burst）を分散させ、
+        さらにジッター付きバックオフでリトライする。同期fetchはto_threadで
+        イベントループ外に逃がす。失敗しても起動は続行する
+        （min_samples未満なら素通しなので安全）。
         """
+        # herd分散: 24コンテナ同時起動のburstをIP制限内に均すため起動を分散
+        await asyncio.sleep(random.uniform(0, 120))
         for attempt in range(4):
             try:
                 lookback_ms = self.cfg.funding_gate.lookback_hours * 3600 * 1000
                 start_ms = int(time.time() * 1000) - lookback_ms
-                history = fetch_funding_history(self.cfg.symbol, start_ms)
+                history = await asyncio.to_thread(
+                    fetch_funding_history, self.cfg.symbol, start_ms
+                )
                 rates = [r for _, r in history]
                 self.funding_gate.seed(rates)
                 # 初回fetch(最大1時間後)までゲートが無効化されないよう最新履歴値をキャッシュ
@@ -794,7 +801,7 @@ class Bot:
                 return
             except Exception as e:
                 log.warning(f"[funding_gate] seed attempt {attempt + 1} failed: {e}")
-                time.sleep(5 * (attempt + 1) + random.uniform(0, 5))
+                await asyncio.sleep(30 * (attempt + 1) + random.uniform(0, 10))
         log.warning("[funding_gate] seed failed after retries (continuing warmup)")
 
     async def _funding_loop(self):
